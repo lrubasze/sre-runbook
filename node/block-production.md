@@ -1,5 +1,9 @@
 # Runbook: Block Production Issues
 
+> **Triggered by alerts:** `NetworkBlockProductionStalled`, `NodesStoppedValidating`
+>
+> See also: [monitoring/alert-reference](../monitoring/alert-reference.md)
+
 ## Symptoms
 
 - Validator is missing its authoring slots
@@ -38,6 +42,13 @@ substrate_block_height{status="best"} - substrate_block_height{status="finalized
 
 ```
 Validator/collator not producing blocks
+│
+├─ Network-wide or single node?
+│  ├─ Check substrate_block_height{status="best"} across multiple nodes
+│  │  └─ If ALL nodes stopped: network-wide consensus failure → escalate immediately
+│  │     Check: recent runtime upgrade, validator availability, dispute status
+│  │
+│  └─ Single node only → continue below
 │
 ├─ Node not synced?
 │  └─ Must be fully synced to produce blocks

@@ -14,3 +14,5 @@ Debugging and operational guides for Polkadot/Kusama node issues.
 | [high-resource-usage](high-resource-usage.md) | OOM, high CPU, disk full |
 | [finalization-stall](finalization-stall.md) | Best block advancing, finalized block stuck |
 | [collator-operations](collator-operations.md) | Parachain collator specific issues |
+| [crash-triage](crash-triage.md) | Node crashed — OOM, panic, segfault diagnosis |
+| [rpc-issues](rpc-issues.md) | RPC unhealthy, slow calls, LB pool failures |

@@ -1,5 +1,9 @@
 # Runbook: Peer Connectivity Issues
 
+> **Triggered by alerts:** `NumberOfPeersLow (>30%)`, `NumberOfPeersLow (>50%)`, `ConnectRequestsHigh`
+>
+> See also: [monitoring/alert-reference](../monitoring/alert-reference.md)
+
 ## Symptoms
 
 - `substrate_sub_libp2p_peers_count` is 0 or very low (<5)
@@ -34,6 +38,25 @@ substrate_sub_libp2p_peers_count{instance="<node>"}
 
 ```
 Low or zero peers
+│
+├─ Fleet-wide or single node?
+│  ├─ Check substrate_sub_libp2p_peers_count across fleet
+│  │
+│  ├─ >50% of nodes affected?
+│  │  └─ Likely infrastructure issue, not a node bug
+│  │     Check: bootnode health, DNS changes, firewall/security group changes
+│  │     Check: shared datacenter/region/provider issues
+│  │
+│  ├─ >30% of nodes affected?
+│  │  └─ Monitor for escalation. Check if affected nodes share a common factor
+│  │     (same region, same provider, same binary version)
+│  │
+│  └─ Single node → continue below
+│
+├─ Validators specifically?
+│  └─ Validators need more peers than full nodes (validation protocol)
+│     Expected: ~600 peers (Polkadot), ~700 peers (Kusama)
+│     Alert threshold: < 90% of expected peer count
 │
 ├─ 0 peers since startup?
 │  ├─ Check firewall / security groups

@@ -1,5 +1,9 @@
 # Runbook: Finalization Stall
 
+> **Triggered by alerts:** `NodesFinalizationSlow (>30%)`, `NodesFinalizationSlow (>50%)`
+>
+> See also: [monitoring/alert-reference](../monitoring/alert-reference.md)
+
 ## Symptoms
 
 - `substrate_block_height{status="finalized"}` not increasing
@@ -88,7 +92,19 @@ If the network is finalizing but this node isn't keeping up:
 
 ### Network-wide finalization stall
 
-**This is critical — escalate immediately** while performing initial checks:
+**This is critical — escalate immediately** while performing initial checks.
+
+**How to determine network-wide vs single-node:**
+```
+# Compare finalization gap across nodes
+substrate_block_height{status="best"} - substrate_block_height{status="finalized"}
+
+# >50% of nodes with gap >20 = network-wide (alert: NodesFinalizationSlow >50%)
+# >30% of nodes with gap >20 = trending issue (alert: NodesFinalizationSlow >30%)
+# Single node with gap >20 = isolated node issue
+```
+
+**Note:** Measure finality lag as `best - finalized` gap, not just "finalized block not moving." A slow block production rate can be confused with a finalization stall. For collators with elastic scaling, finality thresholds may need adjustment.
 
 1. **Check validator availability:**
    - How many validators are online?

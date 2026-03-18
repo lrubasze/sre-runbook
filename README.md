@@ -14,7 +14,9 @@ runbooks/
 │   ├── peer-connectivity.md         # P2P networking issues
 │   ├── high-resource-usage.md       # CPU, memory, disk issues
 │   ├── finalization-stall.md        # Chain not finalizing
-│   └── collator-operations.md       # Parachain collator specifics
+│   ├── collator-operations.md       # Parachain collator specifics
+│   ├── crash-triage.md              # Node crash diagnosis (OOM/panic/segfault)
+│   └── rpc-issues.md               # RPC unhealthy, slow calls, LB issues
 ├── parachain/                       # Parachain chain-level issues
 │   ├── not-producing.md             # Blocks not included on relay chain
 │   ├── xcm-delivery.md             # Cross-chain messages stuck
@@ -25,11 +27,12 @@ runbooks/
 ├── incident-response/               # Incident handling
 │   └── (TODO)
 └── monitoring/                      # Alerts and dashboards
-    └── (TODO)
+    └── alert-reference.md           # Alert → runbook lookup (start here when paged)
 ```
 
 ## How to use
 
+1. **Got paged?** Start with [monitoring/alert-reference](monitoring/alert-reference.md) — maps alerts to first steps and runbooks
 1. Identify the **symptom** you're seeing
 2. Find the relevant runbook in the table below
 3. Follow the **Quick Health Check** to confirm the issue
@@ -49,6 +52,8 @@ runbooks/
 | OOM kills, high CPU, disk full | [node/high-resource-usage](node/high-resource-usage.md) |
 | Best block advancing but finalized block stuck | [node/finalization-stall](node/finalization-stall.md) |
 | Parachain collator not producing / not syncing | [node/collator-operations](node/collator-operations.md) |
+| Node crashed — OOM, panic, segfault | [node/crash-triage](node/crash-triage.md) |
+| RPC unhealthy, slow calls, WebSocket drops | [node/rpc-issues](node/rpc-issues.md) |
 
 ### Parachain issues
 

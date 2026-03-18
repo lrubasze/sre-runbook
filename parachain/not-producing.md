@@ -1,5 +1,9 @@
 # Runbook: Parachain Not Producing Blocks
 
+> **Triggered by alert:** `CollatorNotProducingBlocks` (when collations built but not included)
+>
+> See also: [monitoring/alert-reference](../monitoring/alert-reference.md)
+
 ## Symptoms
 
 - Parachain block height not increasing

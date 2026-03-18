@@ -1,5 +1,9 @@
 # Runbook: Parachain Collator Operations
 
+> **Triggered by alert:** `CollatorNotProducingBlocks`
+>
+> See also: [monitoring/alert-reference](../monitoring/alert-reference.md)
+
 ## Overview
 
 A parachain collator:

@@ -1,5 +1,9 @@
 # Runbook: High Resource Usage
 
+> **Triggered by alerts:** `VMNodeProcessCrashed` (when OOM), `SlowRPCCallTime` (when resource-bound)
+>
+> See also: [monitoring/alert-reference](../monitoring/alert-reference.md)
+
 ## Symptoms
 
 - Node killed by OOM killer
