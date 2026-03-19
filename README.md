@@ -30,15 +30,35 @@ runbooks/
     └── alert-reference.md           # Alert → runbook lookup (start here when paged)
 ```
 
+## Runbook philosophy
+
+Every runbook is structured for **incident use** — you should know what to do within 30 seconds of opening it, without scrolling past reference material you don't need yet.
+
+### Structure (layered by urgency)
+
+1. **Quick check** — first 30 seconds. Is it network-wide? Is the node synced? Basic status check. Just enough to decide where to go next.
+2. **Triage** — numbered steps with bold headings. Walk through the most likely causes. Links to resolution sections and other runbooks where needed.
+3. **Deep Investigation** — metrics checklists, Loki/Prometheus queries, detailed verification steps. Only needed when triage didn't resolve it.
+4. **Resolution** — reference material for specific fixes (keystore repair, resource tuning, PVF bottleneck, etc.). Linked from triage, not inlined.
+5. **Escalation** — what to collect before escalating, who to contact.
+
+### Principles
+
+- **Metrics over logs** — Prometheus metrics are always available regardless of log level configuration. Prefer them for Quick check and Triage. Loki queries go in Deep Investigation.
+- **Verify both sides** — for parachain issues, always check the collator side (block built?) AND the relay chain side (candidate backed/included?). One side reporting success doesn't mean the other agrees.
+- **Link, don't duplicate** — triage steps link to resolution sections and other runbooks rather than inlining explanations. One source of truth per topic.
+- **No invented log messages** — every log string in these runbooks was verified against the polkadot-sdk source code. If a log message can't be confirmed, it doesn't go in.
+- **Placeholders for thresholds** — values that need team agreement use `[TODO: ...]` markers rather than guessed numbers.
+
 ## How to use
 
-1. **Got paged?** Start with [monitoring/alert-reference](monitoring/alert-reference.md) — maps alerts to first steps and runbooks
-1. Identify the **symptom** you're seeing
+1. **Got paged?** Start with [monitoring/alert-reference](monitoring/alert-reference.md) — maps alerts to runbooks
 2. Find the relevant runbook in the table below
-3. Follow the **Quick Health Check** to confirm the issue
-4. Walk through the **Decision Tree** to narrow down the cause
-5. Follow the **Resolution** steps
-6. If unresolved, see **Escalation**
+3. Follow **Quick check** (30 seconds)
+4. Walk through **Triage** to narrow down the cause
+5. If needed, go to **Deep Investigation** for detailed verification
+6. Apply the linked **Resolution**
+7. If unresolved, see **Escalation**
 
 ## Quick reference: Which runbook?
 
