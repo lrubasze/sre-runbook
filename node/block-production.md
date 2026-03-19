@@ -4,273 +4,227 @@
 >
 > See also: [monitoring/alert-reference](../monitoring/alert-reference.md)
 
-## Symptoms
-
-- Validator is missing its authoring slots
-- Collator is not producing parachain blocks
-- Logs show `"Skipping slot: major sync is in progress."` or `"Proposing failed: <error>"`
-- No `"🔖 Pre-sealed block for proposal at ..."` logs when the node should be authoring
-
-## Quick Health Check
-
-```logql
-# Check for authoring-related logs (target: "babe" for validators, "aura" for collators)
-{instance="<node>"} |~ "Starting authorship|Claimed slot|Pre-sealed|Proposing failed|Skipping slot"
-
-# Check for errors during block production
-{instance="<node>"} |~ "slots|babe|aura" |~ "WARN|ERROR"
-```
-
-```bash
-# Check if node considers itself a validator/authority
-curl -s -H "Content-Type: application/json" \
-  -d '{"id":1,"jsonrpc":"2.0","method":"system_nodeRoles","params":[]}' \
-  http://<node>:9944 | jq .
-# Expected: ["Authority"] for validators/collators
-# If ["Full"]: node was not started with --validator flag
-```
-
-**Prometheus (node-side):**
-```promql
-# Is the node keeping up with the chain?
-substrate_block_height{status="best"}
-substrate_block_height{status="finalized"}
-
-# Gap between best and finalized (should be small, <10)
-substrate_block_height{status="best"} - substrate_block_height{status="finalized"}
-```
-
-**Prometheus (validator-side — PVF metrics):**
-
-These metrics are on **relay chain validators**, not collators. They indicate whether
-validators can validate parachain candidates in time.
-
-```promql
-# PVF execution time — time to run validate_block on a parachain candidate
-# Backing timeout: 2s (DEFAULT_BACKING_EXECUTION_TIMEOUT)
-# Approval timeout: 12s (DEFAULT_APPROVAL_EXECUTION_TIMEOUT)
-# If execution exceeds backing timeout → candidate cannot be backed → parachain blocks not included
-histogram_quantile(0.99, rate(polkadot_pvf_execution_time_bucket[5m]))
-
-# PVF preparation time — WASM compilation of parachain validation code
-# One-time cost per code version (cached on disk), but slow prep blocks first execution
-# Precheck timeout: 60s, lenient timeout: 360s
-histogram_quantile(0.99, rate(polkadot_pvf_preparation_time_bucket[5m]))
-
-# Queue pressure — time candidates wait before PVF execution starts
-# High values = validator overloaded with PVF work
-histogram_quantile(0.99, rate(polkadot_pvf_execution_queued_time_bucket[5m]))
-
-# PVF worker pool health
-polkadot_pvf_worker_spawned
-polkadot_pvf_worker_retired
-```
-
-## Decision Tree
-
-> **Note:** Relay chain validators use **BABE** consensus (VRF-based slot assignment).
-> Parachain collators use **AURA** consensus (round-robin slot assignment).
-> The debugging steps differ — see collator-specific section below.
+## Quick check
 
 ```
-Validator/collator not producing blocks
+1. Network-wide or just this node?
+   → Check substrate_block_height{status="best"} across multiple nodes
+   → ALL stopped? Escalate immediately. Single node? Continue.
+
+2. Is the node synced?
+   → substrate_block_height{status="best"} matches chain head?
+   → No → see [not-syncing](not-syncing.md)
+
+3. Is it an authority?
+   → curl -s -H "Content-Type: application/json" \
+       -d '{"id":1,"jsonrpc":"2.0","method":"system_nodeRoles","params":[]}' \
+       http://<node>:9944 | jq .
+   → ["Full"] = not started with --validator flag. Restart with --validator.
+   → ["Authority"] = good. Continue to triage below.
+```
+
+## Triage
+
+> Relay chain validators use **BABE** (VRF slot assignment).
+> Parachain collators use **AURA** (round-robin).
+> If this is a collator, skip to [Collator Triage](#collator-triage).
+
+### Validator triage
+
+```
+Node is synced + Authority + still not producing
 │
-├─ 1. Network-wide or single node?
-│  ├─ Check substrate_block_height{status="best"} across multiple nodes
-│  │  └─ If ALL nodes stopped: network-wide consensus failure → escalate immediately
-│  │     Check: recent runtime upgrade, validator availability, dispute status
+├─ Session keys present?
+│  ├─ author_hasSessionKeys RPC → must return true
+│  └─ Missing → [Keystore Resolution](#keystore-issues)
+│
+├─ In active validator set?
+│  ├─ Check session.validators() on-chain
+│  └─ Not in set → not SRE, notify team
+│
+├─ Check authoring logs:
+│  ├─ "Starting authorship at slot: <N>"
+│  │  ├─ then "🔖 Pre-sealed block for proposal at <N>" → working ✓
+│  │  ├─ then "Proposing failed: <err>" → [Resource Bottleneck](#resource-bottleneck-during-authoring)
+│  │  ├─ then "⌛️ Discarding proposal for slot <N>; block production took too long"
+│  │  │  → [Resource Bottleneck](#resource-bottleneck-during-authoring)
+│  │  └─ no follow-up → hung, check CPU/IO
 │  │
-│  └─ Single node only → continue below
-│
-├─ 2. Node synced?
-│  ├─ Check substrate_block_height{status="best"} against chain head
-│  ├─ Logs: "Skipping slot: major sync is in progress." → still syncing
-│  └─ Not synced → go to [not-syncing](not-syncing.md)
-│
-├─ 3. Started with --validator flag?
-│  ├─ Check: system_nodeRoles RPC → must return ["Authority"]
-│  ├─ If ["Full"] → node was NOT started with --validator
-│  │  └─ Fix: restart the node with --validator flag
-│  └─ If ["Authority"] → continue below
-│
-├─ 4. Session keys in keystore?
-│  ├─ Check keystore directory for key files (see Resolution: Keystore)
-│  ├─ Check: author_hasSessionKeys RPC → must return true
-│  └─ Keys missing → Resolution: Keystore issues
-│
-├─ 5. In active validator set / collator registered?
-│  ├─ Validator: check session.validators() on-chain
-│  ├─ Collator: check on-chain registration
-│  └─ Not in set → not an SRE issue, notify team
-│
-├─ 6. Check authoring logs
-│  ├─ "Starting authorship at slot: <N>" → slot was claimed, block build attempted
-│  │  ├─ Followed by "🔖 Pre-sealed block for proposal at <N>" → block was built ✓
-│  │  ├─ Followed by "Proposing failed: <err>" → proposal error, check error details
-│  │  ├─ Followed by "⌛️ Discarding proposal for slot <N>; block production took too long"
-│  │  │  └─ Block build exceeded slot deadline → Resolution: Resource bottleneck
-│  │  └─ No follow-up log → block build hung, check CPU/IO
-│  │
-│  ├─ "Claimed slot <N>" (BABE debug) but no "Starting authorship"
-│  │  └─ Slot was claimed but inherent data or proposer creation failed
-│  │     Check for: "Unable to author block" or "Unable to create inherent data" warns
+│  ├─ "Claimed slot <N>" but no "Starting authorship"
+│  │  → inherent data or proposer creation failed
+│  │    look for "Unable to author block" or "Unable to create inherent data"
 │  │
 │  └─ No authoring logs at all?
-│     └─ BABE: normal — VRF only assigns some slots to each validator
-│        Only a problem if the node NEVER gets a slot across multiple epochs
+│     → normal for BABE — VRF only assigns some slots per validator
+│       only a problem if NEVER gets a slot across multiple epochs
 │
-└─ 7. Collator-specific issues → see below
+└─ None of the above → [Escalation](#escalation)
 ```
 
-### Collator-specific decision tree
-
-Parachain collators use AURA consensus and have additional dependencies
-beyond what relay chain validators need.
+### Collator triage
 
 ```
 Collator not producing parachain blocks
 │
-├─ Is the embedded relay chain synced?
-│  ├─ Collator runs an embedded relay chain client — both chains must be synced
-│  ├─ Check relay chain sync: compare relay best block vs network head
+├─ Embedded relay chain synced?
+│  ├─ Compare relay best block vs network head
 │  └─ Not synced → wait, or check relay chain peer connectivity
 │
-├─ Does the parachain have a core assigned?
-│  ├─ Bulk coretime: check on.demand.core_count or coretime allocation
-│  ├─ On-demand: check if order was placed and core assigned
-│  └─ No core → see [parachain/coretime](../parachain/coretime.md)
+├─ Core assigned?
+│  ├─ Bulk or on-demand coretime?
+│  └─ No core → [parachain/coretime](../parachain/coretime.md)
 │
-├─ Is the collator claiming AURA slots?
-│  ├─ AURA is round-robin — each collator gets predictable slots
-│  ├─ Check logs for "Building block." or "Not building block."
-│  │  (target: "aura", from slot-based block builder)
+├─ Claiming AURA slots?
+│  ├─ Check logs: "Building block." / "Not building block."
 │  └─ "Not building block due to insufficient authoring duration." → timing issue
 │
 ├─ Block built but not included on relay chain?
-│  ├─ Collation submitted but not backed by validators
-│  ├─ Check: "Submitting collation for core." log → collation was sent
-│  ├─ If no "Submitting collation" → "Unable to build collation." errors
-│  ├─ Verify relay-side: check ParaInclusion::CandidateBacked events on relay chain
-│  │  └─ No backed candidates for your para_id → validators aren't backing
-│  │     Check PVF metrics on validators (see below)
-│  └─ See [parachain/not-producing](../parachain/not-producing.md) for relay-side diagnosis
+│  ├─ "Submitting collation for core." present → collation was sent
+│  ├─ No "Submitting collation" → "Unable to build collation." errors
+│  ├─ Verify relay-side: ParaInclusion::CandidateBacked events for your para_id
+│  │  └─ No backed candidates → validators aren't backing
+│  │     → [PVF Bottleneck](#pvf-validation-bottleneck-validator-side)
+│  └─ See [parachain/not-producing](../parachain/not-producing.md)
 │
-└─ Unincluded segment full? (async backing)
-   ├─ Modern collators can build multiple blocks per relay block
-   ├─ If unincluded segment is at capacity, collator pauses building
-   ├─ Check: parachain blocks advancing on relay chain (inclusion pipeline)
-   └─ If stuck → check relay chain validators are backing the parachain
+├─ Unincluded segment full? (async backing)
+│  ├─ Collator pauses if unincluded segment at capacity
+│  └─ Check if parachain blocks are advancing on relay chain
+│
+└─ None of the above → [Escalation](#escalation)
 ```
 
-## Verification Checklist
+## Deep Investigation
 
-Structured sequence for confirming block production is healthy.
+Use this section when quick triage didn't resolve the issue.
 
 > **Principle:** Always verify both sides — collator-side (block built) AND relay-side
 > (candidate backed/included). A collator reporting success does not mean the relay chain accepted it.
 
-### 1. Metrics check (always available, independent of log level)
+### Metrics check (always available, independent of log level)
 
-- [ ] `substrate_block_height{status="best"}` — is it advancing?
-- [ ] `substrate_block_height{status="finalized"}` — is finality advancing? (check over a `[TODO: agree on window]` interval)
+- [ ] `substrate_block_height{status="best"}` — advancing?
+- [ ] `substrate_block_height{status="finalized"}` — finality advancing? (check over `[TODO: agree on window]`)
 - [ ] Finality lag: `best - finalized` within `[TODO: agree on threshold]` blocks
-- [ ] `node_roles` = 4 (validator) on the node
+- [ ] `node_roles` = 4 (validator)
 - [ ] `substrate_connected_peers` ≥ `[TODO: agree on minimum]`
 
-### 2. Relay-side verification (for parachains)
+### Relay-side verification (for parachains)
 
-- [ ] `ParaInclusion::CandidateBacked` events present for your para_id on relay chain
-- [ ] Backed candidates appearing at expected rate: `[TODO: agree on rate]` per relay block window
-- [ ] **Session boundary awareness:** block production behavior changes at session boundaries — don't measure throughput during the first session after startup or registration
+- [ ] `ParaInclusion::CandidateBacked` events present for your para_id
+- [ ] Backed candidates at expected rate: `[TODO: agree on rate]` per relay block window
+- [ ] **Session boundary awareness:** don't measure throughput during the first session after startup or registration
 
-### 3. PVF health (on relay chain validators)
+### PVF health (on relay chain validators)
 
-If collator builds blocks but they're never included, the bottleneck may be on the validator side:
+If collator builds blocks but they're never included, check the validator side:
 
 - [ ] `polkadot_pvf_execution_time` p99 well below 2s (backing timeout)
 - [ ] `polkadot_pvf_execution_queued_time` not growing (queue pressure)
-- [ ] `polkadot_pvf_preparation_time` — check after runtime upgrades (new WASM needs compilation)
+- [ ] `polkadot_pvf_preparation_time` — check after runtime upgrades
 - [ ] `polkadot_pvf_worker_retired` not spiking (workers crashing)
 
-### 4. Critical error signals (must never appear)
+### Critical error signals (must never appear)
 
-- [ ] `"set_validation_data inherent needs to be present in every block"` — consensus hook broken, collator cannot build valid blocks. Critical error regardless of log level.
+- [ ] `"set_validation_data inherent needs to be present in every block"` — consensus hook broken, collator cannot build valid blocks
+
+### Useful Loki queries
+
+```logql
+# Authoring-related logs (target: "babe" for validators, "aura" for collators)
+{instance="<node>"} |~ "Starting authorship|Claimed slot|Pre-sealed|Proposing failed|Skipping slot"
+
+# Errors during block production
+{instance="<node>"} |~ "slots|babe|aura" |~ "WARN|ERROR"
+```
+
+### Useful Prometheus queries
+
+```promql
+# Node-side
+substrate_block_height{status="best"}
+substrate_block_height{status="finalized"}
+substrate_block_height{status="best"} - substrate_block_height{status="finalized"}
+
+# PVF (on relay chain validators, not collators)
+# Execution time — hard 2s timeout for backing, 12s for approval
+histogram_quantile(0.99, rate(polkadot_pvf_execution_time_bucket[5m]))
+# Preparation time — WASM compilation, one-time per code version
+histogram_quantile(0.99, rate(polkadot_pvf_preparation_time_bucket[5m]))
+# Queue pressure
+histogram_quantile(0.99, rate(polkadot_pvf_execution_queued_time_bucket[5m]))
+# Worker pool health
+polkadot_pvf_worker_spawned
+polkadot_pvf_worker_retired
+```
 
 ## Resolution
 
 ### Keystore issues
 
-The keystore holds the validator's session keys. Without them, the node can't sign blocks.
+The keystore holds session keys. Without them, the node can't sign blocks.
 
-1. **Check keystore directory exists** and contains key files:
+1. **Check keystore directory:**
    ```bash
    ls <base-path>/chains/<chain>/keystore/
-   # Should contain files like:
+   # Expected files:
    #   62616265<hex>  (babe - relay chain block production)
    #   6772616e<hex>  (gran - GRANDPA finality)
    #   61757261<hex>  (aura - parachain block production, for collators)
    ```
-2. **Verify keys match on-chain session keys:**
+2. **Verify keys match on-chain:**
    ```bash
    curl -s -H "Content-Type: application/json" \
      -d '{"id":1,"jsonrpc":"2.0","method":"author_hasSessionKeys","params":["<session_keys_hex>"]}' \
      http://<node>:9944 | jq .
    # Expected: {"result": true}
-   # Returns true only if the keystore has private keys for ALL session key types
+   # Returns true only if keystore has private keys for ALL session key types
    ```
-3. If keys are missing: **re-insert session keys** (coordinate with the validator operator)
+3. Keys missing → **re-insert session keys** (coordinate with validator operator)
 
 ### Resource bottleneck during authoring
 
-Key log to look for: `"⌛️ Discarding proposal for slot <N>; block production took too long"`
+Key log: `"⌛️ Discarding proposal for slot <N>; block production took too long"`
 
-- Relay chain: block must be built within the 6s BABE slot window (proposer gets a fraction of this)
-- Parachains: minimum block production interval is 500ms (`BLOCK_PRODUCTION_MINIMUM_INTERVAL_MS`); if authoring duration is insufficient, the collator logs `"Not building block due to insufficient authoring duration."` and skips
+- Relay chain: must build within the 6s BABE slot window
+- Parachains: 500ms minimum block production interval; if insufficient, collator logs `"Not building block due to insufficient authoring duration."`
 
 Actions:
 - Check CPU usage during the slot
-- Check if state trie is too large (deep storage reads)
-- Check for RocksDB compaction competing for IO
+- Check state trie size (deep storage reads)
+- Check RocksDB compaction competing for IO
 - See [high-resource-usage](high-resource-usage.md)
+
+> **Tip:** If compiled in debug mode, you'll see:
+> `"👉 Recompile your node in --release mode to mitigate this problem."`
 
 ### PVF validation bottleneck (validator-side)
 
-If a collator builds and submits blocks but `ParaInclusion::CandidateBacked` events are missing
-for the para_id, the problem may be on the relay chain validators. PVF (Parachain Validation
-Function) is the two-phase process validators use to verify parachain candidates:
+If a collator builds blocks but `ParaInclusion::CandidateBacked` events are missing,
+the problem may be on relay chain validators.
 
-1. **Preparation** — WASM compilation of the parachain's validation code. One-time cost per code
-   version, cached on disk. Slow preparation after a runtime upgrade can delay first inclusion.
-2. **Execution** — calling `validate_block` on the compiled artifact. This runs on every candidate
-   and has a hard 2s timeout for backing (`DEFAULT_BACKING_EXECUTION_TIMEOUT`). If execution
-   exceeds this, the candidate is dropped and the parachain block is never included.
+**PVF** (Parachain Validation Function) has two phases:
+1. **Preparation** — WASM compilation. One-time per code version, cached on disk. Slow after runtime upgrades.
+2. **Execution** — `validate_block` call. Runs on every candidate. Hard 2s timeout for backing (`DEFAULT_BACKING_EXECUTION_TIMEOUT`). Exceeding this = candidate dropped.
 
 **Diagnosis (on relay chain validators):**
 ```promql
-# Are executions timing out?
+# Executions timing out?
 histogram_quantile(0.99, rate(polkadot_pvf_execution_time_bucket[5m]))
-# Healthy: well below 2s. Problem: approaching or exceeding 2s.
 
-# Is the queue backing up?
+# Queue backing up?
 histogram_quantile(0.99, rate(polkadot_pvf_execution_queued_time_bucket[5m]))
-# Growing queue time = validator overloaded with PVF work.
 
-# Are workers dying?
+# Workers dying?
 rate(polkadot_pvf_worker_retired[5m])
-# Spikes indicate workers crashing during execution.
 ```
 
-**Actions:**
+Actions:
 - Check validator CPU/memory — PVF execution is CPU-bound
-- After a parachain runtime upgrade: preparation may be slow for the new WASM; monitor `polkadot_pvf_preparation_time`
-- If workers are crashing: check validator logs for PVF worker panics, possible hardware issues
-
-> **Tip:** If the node was compiled in debug mode, you'll see:
-> `"👉 Recompile your node in --release mode to mitigate this problem."`
-> Always run production nodes with `--release`.
+- After runtime upgrade: monitor `polkadot_pvf_preparation_time` for new WASM compilation
+- Workers crashing: check validator logs for PVF worker panics
 
 ## Escalation
 
-- Collect: node role (`system_nodeRoles`), `--validator` flag presence, key presence (`author_hasSessionKeys`), sync status, logs from missed slots
-- For collators: relay chain sync status + parachain sync status + core assignment status
+- Collect: node role (`system_nodeRoles`), `--validator` flag, key presence (`author_hasSessionKeys`), sync status, authoring logs
+- For collators: relay chain sync + parachain sync + core assignment + `ParaInclusion::CandidateBacked` status
 - Escalate to: `[TODO: dev team contact / channel]`
