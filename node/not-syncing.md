@@ -28,7 +28,7 @@ curl -s -H "Content-Type: application/json" \
 
 2. **Syncing but falling behind?**
    - Check CPU — at 100%? Block execution is CPU-bound → see [high-resource-usage](high-resource-usage.md)
-   - Check disk I/O — saturated? RocksDB is I/O-bound → upgrade to SSD/NVMe
+   - Check disk I/O — saturated? RocksDB is I/O-bound → see [high-resource-usage](high-resource-usage.md)
    - Check network bandwidth — insufficient for block download?
 
 3. **Stuck after restart?**

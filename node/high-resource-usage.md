@@ -125,7 +125,7 @@ Options:
 
 RocksDB periodically compacts data, causing temporary CPU + I/O spikes.
 - This is normal behavior
-- If it causes issues: consider NVMe storage for better I/O
+- If it causes issues: check storage I/O capacity
 - `--database paritydb` is an alternative backend (less compaction overhead, but less battle-tested)
 
 ## Escalation
