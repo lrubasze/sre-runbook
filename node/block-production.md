@@ -6,22 +6,22 @@
 
 ## Quick check
 
-```
-1. Network-wide or just this node?
-   → Check substrate_block_height{status="best"} across multiple nodes
-   → ALL stopped? Escalate immediately. Single node? Continue.
+**1. Network-wide or just this node?**
+- Check `substrate_block_height{status="best"}` across multiple nodes
+- ALL stopped? **Escalate immediately.** Single node? Continue.
 
-2. Is the node synced?
-   → substrate_block_height{status="best"} matches chain head?
-   → No → see [not-syncing](not-syncing.md)
+**2. Is the node synced?**
+- `substrate_block_height{status="best"}` matches chain head?
+- No → see [not-syncing](not-syncing.md)
 
-3. Is it an authority?
-   → curl -s -H "Content-Type: application/json" \
-       -d '{"id":1,"jsonrpc":"2.0","method":"system_nodeRoles","params":[]}' \
-       http://<node>:9944 | jq .
-   → ["Full"] = not started with --validator flag. Restart with --validator.
-   → ["Authority"] = good. Continue to triage below.
+**3. Is it an authority?**
+```bash
+curl -s -H "Content-Type: application/json" \
+  -d '{"id":1,"jsonrpc":"2.0","method":"system_nodeRoles","params":[]}' \
+  http://<node>:9944 | jq .
 ```
+- `["Full"]` → not started with `--validator` flag. Restart with `--validator`.
+- `["Authority"]` → good. Continue to [Triage](#triage).
 
 ## Triage
 
@@ -31,67 +31,55 @@
 
 ### Validator triage
 
-```
-Node is synced + Authority + still not producing
-│
-├─ Session keys present?
-│  ├─ author_hasSessionKeys RPC → must return true
-│  └─ Missing → [Keystore Resolution](#keystore-issues)
-│
-├─ In active validator set?
-│  ├─ Check session.validators() on-chain
-│  └─ Not in set → not SRE, notify team
-│
-├─ Check authoring logs:
-│  ├─ "Starting authorship at slot: <N>"
-│  │  ├─ then "🔖 Pre-sealed block for proposal at <N>" → working ✓
-│  │  ├─ then "Proposing failed: <err>" → [Resource Bottleneck](#resource-bottleneck-during-authoring)
-│  │  ├─ then "⌛️ Discarding proposal for slot <N>; block production took too long"
-│  │  │  → [Resource Bottleneck](#resource-bottleneck-during-authoring)
-│  │  └─ no follow-up → hung, check CPU/IO
-│  │
-│  ├─ "Claimed slot <N>" but no "Starting authorship"
-│  │  → inherent data or proposer creation failed
-│  │    look for "Unable to author block" or "Unable to create inherent data"
-│  │
-│  └─ No authoring logs at all?
-│     → normal for BABE — VRF only assigns some slots per validator
-│       only a problem if NEVER gets a slot across multiple epochs
-│
-└─ None of the above → [Escalation](#escalation)
-```
+Node is synced + Authority + still not producing:
+
+1. **Session keys present?**
+   - `author_hasSessionKeys` RPC → must return `true`
+   - Missing → [Keystore Resolution](#keystore-issues)
+
+2. **In active validator set?**
+   - Check `session.validators()` on-chain
+   - Not in set → not SRE, notify team
+
+3. **Check authoring logs:**
+   - `"Starting authorship at slot: <N>"` → slot was claimed, block build attempted
+     - then `"🔖 Pre-sealed block for proposal at <N>"` → working, block was built
+     - then `"Proposing failed: <err>"` → [Resource Bottleneck](#resource-bottleneck-during-authoring)
+     - then `"⌛️ Discarding proposal for slot <N>; block production took too long"` → [Resource Bottleneck](#resource-bottleneck-during-authoring)
+     - no follow-up log → hung, check CPU/IO
+   - `"Claimed slot <N>"` but no `"Starting authorship"` → inherent data or proposer creation failed. Look for `"Unable to author block"` or `"Unable to create inherent data"`
+   - No authoring logs at all? → normal for BABE (VRF only assigns some slots per validator). Only a problem if NEVER gets a slot across multiple epochs.
+
+4. **None of the above** → [Escalation](#escalation)
 
 ### Collator triage
 
-```
-Collator not producing parachain blocks
-│
-├─ Embedded relay chain synced?
-│  ├─ Compare relay best block vs network head
-│  └─ Not synced → wait, or check relay chain peer connectivity
-│
-├─ Core assigned?
-│  ├─ Bulk or on-demand coretime?
-│  └─ No core → [parachain/coretime](../parachain/coretime.md)
-│
-├─ Claiming AURA slots?
-│  ├─ Check logs: "Building block." / "Not building block."
-│  └─ "Not building block due to insufficient authoring duration." → timing issue
-│
-├─ Block built but not included on relay chain?
-│  ├─ "Submitting collation for core." present → collation was sent
-│  ├─ No "Submitting collation" → "Unable to build collation." errors
-│  ├─ Verify relay-side: ParaInclusion::CandidateBacked events for your para_id
-│  │  └─ No backed candidates → validators aren't backing
-│  │     → [PVF Bottleneck](#pvf-validation-bottleneck-validator-side)
-│  └─ See [parachain/not-producing](../parachain/not-producing.md)
-│
-├─ Unincluded segment full? (async backing)
-│  ├─ Collator pauses if unincluded segment at capacity
-│  └─ Check if parachain blocks are advancing on relay chain
-│
-└─ None of the above → [Escalation](#escalation)
-```
+Collator not producing parachain blocks:
+
+1. **Embedded relay chain synced?**
+   - Compare relay best block vs network head
+   - Not synced → wait, or check relay chain peer connectivity
+
+2. **Core assigned?**
+   - Bulk or on-demand coretime?
+   - No core → [parachain/coretime](../parachain/coretime.md)
+
+3. **Claiming AURA slots?**
+   - Check logs: `"Building block."` / `"Not building block."`
+   - `"Not building block due to insufficient authoring duration."` → timing issue, see [Resource Bottleneck](#resource-bottleneck-during-authoring)
+
+4. **Block built but not included on relay chain?**
+   - `"Submitting collation for core."` present → collation was sent
+   - No `"Submitting collation"` → look for `"Unable to build collation."` errors
+   - Verify relay-side: `ParaInclusion::CandidateBacked` events for your para_id
+     - No backed candidates → validators aren't backing → [PVF Bottleneck](#pvf-validation-bottleneck-validator-side)
+   - See also [parachain/not-producing](../parachain/not-producing.md)
+
+5. **Unincluded segment full?** (async backing)
+   - Collator pauses if unincluded segment at capacity
+   - Check if parachain blocks are advancing on relay chain
+
+6. **None of the above** → [Escalation](#escalation)
 
 ## Deep Investigation
 
