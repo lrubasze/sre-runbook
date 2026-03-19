@@ -30,7 +30,7 @@ curl -s -H "Content-Type: application/json" \
 # If ["Full"]: node was not started with --validator flag
 ```
 
-**Prometheus:**
+**Prometheus (node-side):**
 ```promql
 # Is the node keeping up with the chain?
 substrate_block_height{status="best"}
@@ -38,6 +38,32 @@ substrate_block_height{status="finalized"}
 
 # Gap between best and finalized (should be small, <10)
 substrate_block_height{status="best"} - substrate_block_height{status="finalized"}
+```
+
+**Prometheus (validator-side — PVF metrics):**
+
+These metrics are on **relay chain validators**, not collators. They indicate whether
+validators can validate parachain candidates in time.
+
+```promql
+# PVF execution time — time to run validate_block on a parachain candidate
+# Backing timeout: 2s (DEFAULT_BACKING_EXECUTION_TIMEOUT)
+# Approval timeout: 12s (DEFAULT_APPROVAL_EXECUTION_TIMEOUT)
+# If execution exceeds backing timeout → candidate cannot be backed → parachain blocks not included
+histogram_quantile(0.99, rate(polkadot_pvf_execution_time_bucket[5m]))
+
+# PVF preparation time — WASM compilation of parachain validation code
+# One-time cost per code version (cached on disk), but slow prep blocks first execution
+# Precheck timeout: 60s, lenient timeout: 360s
+histogram_quantile(0.99, rate(polkadot_pvf_preparation_time_bucket[5m]))
+
+# Queue pressure — time candidates wait before PVF execution starts
+# High values = validator overloaded with PVF work
+histogram_quantile(0.99, rate(polkadot_pvf_execution_queued_time_bucket[5m]))
+
+# PVF worker pool health
+polkadot_pvf_worker_spawned
+polkadot_pvf_worker_retired
 ```
 
 ## Decision Tree
@@ -124,6 +150,9 @@ Collator not producing parachain blocks
 │  ├─ Collation submitted but not backed by validators
 │  ├─ Check: "Submitting collation for core." log → collation was sent
 │  ├─ If no "Submitting collation" → "Unable to build collation." errors
+│  ├─ Verify relay-side: check ParaInclusion::CandidateBacked events on relay chain
+│  │  └─ No backed candidates for your para_id → validators aren't backing
+│  │     Check PVF metrics on validators (see below)
 │  └─ See [parachain/not-producing](../parachain/not-producing.md) for relay-side diagnosis
 │
 └─ Unincluded segment full? (async backing)
@@ -132,6 +161,40 @@ Collator not producing parachain blocks
    ├─ Check: parachain blocks advancing on relay chain (inclusion pipeline)
    └─ If stuck → check relay chain validators are backing the parachain
 ```
+
+## Verification Checklist
+
+Structured sequence for confirming block production is healthy.
+
+> **Principle:** Always verify both sides — collator-side (block built) AND relay-side
+> (candidate backed/included). A collator reporting success does not mean the relay chain accepted it.
+
+### 1. Metrics check (always available, independent of log level)
+
+- [ ] `substrate_block_height{status="best"}` — is it advancing?
+- [ ] `substrate_block_height{status="finalized"}` — is finality advancing? (check over a `[TODO: agree on window]` interval)
+- [ ] Finality lag: `best - finalized` within `[TODO: agree on threshold]` blocks
+- [ ] `node_roles` = 4 (validator) on the node
+- [ ] `substrate_connected_peers` ≥ `[TODO: agree on minimum]`
+
+### 2. Relay-side verification (for parachains)
+
+- [ ] `ParaInclusion::CandidateBacked` events present for your para_id on relay chain
+- [ ] Backed candidates appearing at expected rate: `[TODO: agree on rate]` per relay block window
+- [ ] **Session boundary awareness:** block production behavior changes at session boundaries — don't measure throughput during the first session after startup or registration
+
+### 3. PVF health (on relay chain validators)
+
+If collator builds blocks but they're never included, the bottleneck may be on the validator side:
+
+- [ ] `polkadot_pvf_execution_time` p99 well below 2s (backing timeout)
+- [ ] `polkadot_pvf_execution_queued_time` not growing (queue pressure)
+- [ ] `polkadot_pvf_preparation_time` — check after runtime upgrades (new WASM needs compilation)
+- [ ] `polkadot_pvf_worker_retired` not spiking (workers crashing)
+
+### 4. Critical error signals (must never appear)
+
+- [ ] `"set_validation_data inherent needs to be present in every block"` — consensus hook broken, collator cannot build valid blocks. Critical error regardless of log level.
 
 ## Resolution
 
@@ -169,6 +232,38 @@ Actions:
 - Check if state trie is too large (deep storage reads)
 - Check for RocksDB compaction competing for IO
 - See [high-resource-usage](high-resource-usage.md)
+
+### PVF validation bottleneck (validator-side)
+
+If a collator builds and submits blocks but `ParaInclusion::CandidateBacked` events are missing
+for the para_id, the problem may be on the relay chain validators. PVF (Parachain Validation
+Function) is the two-phase process validators use to verify parachain candidates:
+
+1. **Preparation** — WASM compilation of the parachain's validation code. One-time cost per code
+   version, cached on disk. Slow preparation after a runtime upgrade can delay first inclusion.
+2. **Execution** — calling `validate_block` on the compiled artifact. This runs on every candidate
+   and has a hard 2s timeout for backing (`DEFAULT_BACKING_EXECUTION_TIMEOUT`). If execution
+   exceeds this, the candidate is dropped and the parachain block is never included.
+
+**Diagnosis (on relay chain validators):**
+```promql
+# Are executions timing out?
+histogram_quantile(0.99, rate(polkadot_pvf_execution_time_bucket[5m]))
+# Healthy: well below 2s. Problem: approaching or exceeding 2s.
+
+# Is the queue backing up?
+histogram_quantile(0.99, rate(polkadot_pvf_execution_queued_time_bucket[5m]))
+# Growing queue time = validator overloaded with PVF work.
+
+# Are workers dying?
+rate(polkadot_pvf_worker_retired[5m])
+# Spikes indicate workers crashing during execution.
+```
+
+**Actions:**
+- Check validator CPU/memory — PVF execution is CPU-bound
+- After a parachain runtime upgrade: preparation may be slow for the new WASM; monitor `polkadot_pvf_preparation_time`
+- If workers are crashing: check validator logs for PVF worker panics, possible hardware issues
 
 > **Tip:** If the node was compiled in debug mode, you'll see:
 > `"👉 Recompile your node in --release mode to mitigate this problem."`
