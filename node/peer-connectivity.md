@@ -4,87 +4,79 @@
 >
 > See also: [monitoring/alert-reference](../monitoring/alert-reference.md)
 
-## Symptoms
+## Quick check
 
-- `substrate_sub_libp2p_peers_count` is 0 or very low (<5)
-- Logs show "Disconnected" or "Connection refused"
-- Node is isolated — not receiving new blocks
+**1. Fleet-wide or single node?**
+- Check `substrate_sub_libp2p_peers_count` across fleet
+- \>50% affected → infrastructure issue (bootnode health, DNS, firewall/security group changes, datacenter/provider)
+- \>30% affected → monitor, check if affected nodes share a common factor (region, provider, binary version)
+- Single node → continue
 
-## Quick Health Check
-
+**2. How many peers?**
 ```bash
-# Check peer count via RPC
-curl -s -H "Content-Type: application/json" \
-  -d '{"id":1,"jsonrpc":"2.0","method":"system_health","params":[]}' \
-  http://<node>:9933 | jq .
-
-# List connected peers
 curl -s -H "Content-Type: application/json" \
   -d '{"id":1,"jsonrpc":"2.0","method":"system_peers","params":[]}' \
-  http://<node>:9933 | jq '.result | length'
+  http://<node>:9944 | jq '.result | length'
 ```
 
-**Prometheus:**
-```
-substrate_sub_libp2p_peers_count{instance="<node>"}
-```
+**3. Has it ever had peers?**
+- 0 since startup → likely firewall/bootnode issue
+- Had peers, then lost them → likely ban/network/resource issue
 
-**Loki:**
+## Triage
+
+### 0 peers since startup
+
+1. **Firewall / security groups?**
+   - Port 30333 (or custom) must be open inbound + outbound
+   - See [Firewall resolution](#firewall--security-group)
+
+2. **Bootnodes reachable?**
+   - `nc -zv <bootnode-ip> <port>`
+   - Unreachable → network/firewall issue or bootnode down
+   - See [Bootnode resolution](#bootnode-issues)
+
+3. **Wrong chain spec or genesis?**
+   - Node won't connect to peers on a different chain
+   - Check node logs for chain name at startup
+
+### Had peers, then lost them
+
+1. **Node banned by peers?**
+   - Logs: `"Banned"` or `"reputation"`
+   - Cause: node sending invalid data (corrupt DB, wrong fork)
+   - See [Ban resolution](#node-banned-by-peers)
+
+2. **Network issue on the host?**
+   - Check: `ping`, `traceroute`, DNS resolution
+
+3. **Resource exhaustion?**
+   - Check `ulimit -n` (file descriptors) and connection count: `ss -tn | grep :30333 | wc -l`
+   - See [File descriptor resolution](#file-descriptor-limits)
+
+### Peers connected but no data flowing
+
+- Check logs for sync protocol issues
+- Possible protocol version mismatch (outdated binary) → upgrade node binary
+
+### Validators specifically
+
+- Validators need more peers than full nodes (validation protocol)
+- Expected: ~600 peers (Polkadot), ~700 peers (Kusama)
+- Alert threshold: < 90% of expected peer count
+
+## Deep Investigation
+
+### Useful Loki queries
+
 ```logql
 {instance="<node>"} |~ "peer|connect|disconnect|libp2p"
 ```
 
-## Decision Tree
+### Useful Prometheus queries
 
-```
-Low or zero peers
-│
-├─ Fleet-wide or single node?
-│  ├─ Check substrate_sub_libp2p_peers_count across fleet
-│  │
-│  ├─ >50% of nodes affected?
-│  │  └─ Likely infrastructure issue, not a node bug
-│  │     Check: bootnode health, DNS changes, firewall/security group changes
-│  │     Check: shared datacenter/region/provider issues
-│  │
-│  ├─ >30% of nodes affected?
-│  │  └─ Monitor for escalation. Check if affected nodes share a common factor
-│  │     (same region, same provider, same binary version)
-│  │
-│  └─ Single node → continue below
-│
-├─ Validators specifically?
-│  └─ Validators need more peers than full nodes (validation protocol)
-│     Expected: ~600 peers (Polkadot), ~700 peers (Kusama)
-│     Alert threshold: < 90% of expected peer count
-│
-├─ 0 peers since startup?
-│  ├─ Check firewall / security groups
-│  │  └─ Port 30333 (or custom) must be open inbound + outbound
-│  │
-│  ├─ Check bootnodes reachable?
-│  │  └─ telnet/nc to bootnode IP:port
-│  │     If unreachable: network/firewall issue
-│  │
-│  └─ Wrong chain spec or genesis?
-│     └─ Node won't connect to peers on different chain
-│        Check: node logs for chain name at startup
-│
-├─ Had peers, then lost them?
-│  ├─ Check if node was banned by peers
-│  │  └─ Logs: "Banned" or "reputation"
-│  │     Cause: node sending invalid data (corrupt DB, wrong fork)
-│  │
-│  ├─ Network issue on the host?
-│  │  └─ Check: ping, traceroute, DNS resolution
-│  │
-│  └─ Resource exhaustion (too many connections)?
-│     └─ Check: ulimit -n (file descriptors), netstat/ss connection count
-│
-└─ Peers connected but no data flowing?
-   └─ Check logs for sync protocol issues
-      Possible protocol version mismatch (outdated binary)
-      → Resolution: Upgrade node binary
+```promql
+substrate_sub_libp2p_peers_count{instance="<node>"}
 ```
 
 ## Resolution

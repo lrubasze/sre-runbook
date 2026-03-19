@@ -1,78 +1,55 @@
 # Runbook: Parachain Onboarding Issues
 
-## Symptoms
+## Quick check
 
-- New parachain not appearing as active on relay chain
-- Parachain stuck in "Onboarding" state
-- Genesis head or validation code not accepted
-
-## Background
-
-Parachain onboarding steps:
-1. **Reserve a para ID** on the relay chain
-2. **Register** genesis head (state) and validation code (WASM)
-3. **Acquire coretime** (bulk or on-demand)
-4. Parachain transitions: `Onboarding → Parathread/Parachain`
-
-This process takes **2 session boundaries** (~2 hours on Polkadot, ~10 minutes on testnets).
-
-## Quick Health Check
-
-**On-chain:**
+**1. Is the parachain registered?**
 ```
-# Check lifecycle status
 paras.paraLifecycles(paraId)
-# Possible values: Onboarding, Parathread, Parachain, UpgradingParathread,
-#                  DowngradingParachain, OffboardingParathread, OffboardingParachain
+# Not found → registration not submitted or failed
+# "Onboarding" → normal, wait for 2 session boundaries
+```
 
-# Check if code and head are registered
+**2. How long has it been onboarding?**
+- Onboarding takes **2 session boundaries** (~2 hours on Polkadot, ~10 minutes on testnets)
+- Check current session: `session.currentIndex`
+- Stuck >3 sessions → see [Stuck in Onboarding](#stuck-in-onboarding)
+
+**3. Are code and head registered?**
+```
 paras.heads(paraId)
 paras.currentCodeHash(paraId)
+# Both must return values
 ```
 
-## Decision Tree
+## Triage
 
-```
-Parachain not active
-│
-├─ Not registered at all?
-│  └─ para ID not found in paras.paraLifecycles
-│     → Registration transaction not submitted or failed
-│     Check: registrar.register extrinsic in recent blocks
-│
-├─ Status: "Onboarding"?
-│  └─ This is normal — wait for 2 session boundaries
-│     Check current session: session.currentIndex
-│     If stuck >3 sessions: may be a registration issue
-│
-├─ Status: "Parathread" but expected "Parachain"?
-│  └─ Parathread = on-demand coretime only
-│     Needs bulk coretime assignment to become "Parachain"
-│     → see [coretime](coretime.md)
-│
-├─ Status: "OffboardingParathread"?
-│  └─ Parachain is being removed
-│     This is a governance/admin action — check if intentional
-│
-└─ Registration failed?
-   ├─ Validation code too large?
-   │  └─ Max code size is ~5MB (relay chain configured)
-   │     Check: configuration.activeConfig().max_code_size
-   │
-   ├─ Deposit insufficient?
-   │  └─ Registration requires a deposit
-   │     Check: registrar.registrationDeposit
-   │
-   └─ Genesis head invalid?
-      └─ Must be valid state root for the parachain runtime
-         Re-export genesis with correct runtime
-```
+1. **Not registered at all?**
+   - Para ID not found in `paras.paraLifecycles`
+   - Registration transaction not submitted or failed
+   - Check `registrar.register` extrinsic in recent blocks
+
+2. **Status: `Onboarding`?**
+   - Normal — wait for 2 session boundaries
+   - Stuck >3 sessions → see [Stuck in Onboarding](#stuck-in-onboarding)
+
+3. **Status: `Parathread` but expected `Parachain`?**
+   - `Parathread` = on-demand coretime only
+   - Needs bulk coretime assignment to become `Parachain`
+   - See [coretime](coretime.md)
+
+4. **Status: `OffboardingParathread`?**
+   - Parachain is being removed — check if intentional (governance/admin action)
+
+5. **Registration failed?**
+   - Validation code too large? Max ~5MB: `configuration.activeConfig().max_code_size`
+   - Deposit insufficient? Check `registrar.registrationDeposit`
+   - Genesis head invalid? Must be valid state root for the parachain runtime
 
 ## Resolution
 
 ### Stuck in Onboarding
 
-If the parachain has been in "Onboarding" for more than 3 sessions:
+If the parachain has been in `Onboarding` for more than 3 sessions:
 1. Verify both `paras.heads(paraId)` and `paras.currentCodeHash(paraId)` return values
 2. If either is missing: registration was incomplete — re-submit
 3. Check relay chain logs around session boundaries for errors mentioning this para ID

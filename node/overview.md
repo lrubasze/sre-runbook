@@ -90,8 +90,7 @@ Both must be healthy for the collator to function.
 | Port | Service |
 |---|---|
 | `30333` | P2P (libp2p) |
-| `9944` | WebSocket RPC |
-| `9933` | HTTP RPC |
+| `9944` | RPC (HTTP + WebSocket, unified since recent SDK versions) |
 | `9615` | Prometheus metrics |
 
 ## Useful CLI flags for debugging

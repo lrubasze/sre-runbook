@@ -1,32 +1,64 @@
 # Runbook: XCM Message Delivery Issues
 
-## Symptoms
+## Quick check
 
-- Cross-chain transfer stuck (tokens sent but not received on destination)
-- XCM messages queued but not processed
-- `xcmpQueue` or `dmpQueue` growing without being consumed
-
-## Quick Health Check
-
-**Identify the direction:**
+**1. Identify the direction:**
 - **DMP** (Downward Message Passing): relay chain → parachain
 - **UMP** (Upward Message Passing): parachain → relay chain
 - **XCMP/HRMP** (Horizontal): parachain → parachain (via relay chain channels)
 
-**On-chain checks:**
-```
-# Check HRMP channels exist between parachains
-hrmp.hrmpChannels([senderParaId, recipientParaId])
+**2. Was the message sent?**
+- Check the sending extrinsic succeeded on the source chain
 
-# Check DMP queue for a parachain
-dmp.downwardMessageQueues(paraId)
+**3. Are both chains producing blocks?**
+- XCM delivery requires both source and destination to be producing blocks
 
-# Check parachain's inbound XCMP queue
-# (on the parachain itself)
-xcmpQueue.inboundXcmpMessages(senderParaId)
-```
+## Triage
 
-**Loki:**
+### Relay → Parachain (DMP)
+
+1. **Message in relay DMP queue?**
+   - Check `dmp.downwardMessageQueues(paraId)` on relay chain
+   - Not there → message may not have been sent. Check sending extrinsic.
+   - Present → parachain not processing DMP. Is parachain producing blocks? If not → see [not-producing](not-producing.md)
+   - Parachain producing but DMP not consumed → [DMP queue stalled](#dmp-queue-processing-stalled)
+
+2. **Message delivered but not executed?**
+   - XCM execution error on destination → [XCM execution errors](#xcm-execution-errors)
+
+### Parachain → Relay (UMP)
+
+1. **Message in parachain's outbound UMP queue?**
+   - UMP messages are delivered when parachain block is included on relay chain
+   - Check if parachain blocks are being included
+
+2. **Message delivered but execution failed?**
+   - → [XCM execution errors](#xcm-execution-errors)
+
+### Parachain → Parachain (HRMP)
+
+1. **HRMP channel exists?**
+   - Check `hrmp.hrmpChannels([senderParaId, recipientParaId])`
+   - No channel → must be opened (requires governance or sudo on both sides)
+
+2. **Channel open but message not delivered?**
+   - Both parachains must be producing blocks for HRMP to work
+
+3. **Channel capacity full?**
+   - HRMP channels have a max capacity (messages + bytes)
+   - Messages queue until space is available
+   - See [HRMP channel capacity](#hrmp-channel-capacity)
+
+### Message delivered but funds/action not visible
+
+- XCM executed but may have trapped assets
+- Check `xcmPallet.assetTraps` or events on destination chain
+- See [Trapped assets](#trapped-assets)
+
+## Deep Investigation
+
+### Useful Loki queries
+
 ```logql
 # XCM-related logs
 {instance="<node>"} |~ "xcm|XCM|hrmp|dmp|ump"
@@ -35,51 +67,17 @@ xcmpQueue.inboundXcmpMessages(senderParaId)
 {instance="<node>"} |~ "message.*queue|MessageQueue"
 ```
 
-## Decision Tree
+### On-chain checks
 
 ```
-XCM message not delivered
-│
-├─ Which direction?
-│  ├─ Relay → Parachain (DMP)
-│  │  ├─ Message in relay DMP queue?
-│  │  │  ├─ Yes → parachain not processing DMP
-│  │  │  │  └─ Is parachain producing blocks?
-│  │  │  │     └─ No → see [not-producing](not-producing.md)
-│  │  │  │     └─ Yes → DMP queue processing stalled
-│  │  │  │        → Resolution: DMP queue
-│  │  │  └─ No → message may not have been sent
-│  │  │     └─ Check sending extrinsic succeeded on relay chain
-│  │  │
-│  │  └─ Message delivered but not executed?
-│  │     └─ XCM execution error on destination
-│  │        → Resolution: XCM execution errors
-│  │
-│  ├─ Parachain → Relay (UMP)
-│  │  ├─ Message in parachain's outbound UMP queue?
-│  │  │  └─ Check if parachain blocks are being included on relay
-│  │  │     UMP messages are delivered when parachain block is included
-│  │  │
-│  │  └─ Message delivered to relay but execution failed?
-│  │     └─ → Resolution: XCM execution errors
-│  │
-│  └─ Parachain → Parachain (HRMP)
-│     ├─ HRMP channel exists?
-│     │  └─ No → channel must be opened (requires governance or sudo on both sides)
-│     │
-│     ├─ Channel open but message not delivered?
-│     │  └─ Check if both parachains are producing blocks
-│     │     HRMP messages require both chains to be active
-│     │
-│     └─ Channel capacity full?
-│        └─ HRMP channels have a max capacity (messages + bytes)
-│           Messages queue until space is available
-│           → Resolution: HRMP channel capacity
-│
-└─ Message delivered but funds/action not visible?
-   └─ XCM executed but may have trapped assets
-      Check: xcmPallet.assetTraps or events on destination chain
-      → Resolution: Trapped assets
+# HRMP channels
+hrmp.hrmpChannels([senderParaId, recipientParaId])
+
+# DMP queue
+dmp.downwardMessageQueues(paraId)
+
+# Parachain's inbound XCMP queue (on the parachain)
+xcmpQueue.inboundXcmpMessages(senderParaId)
 ```
 
 ## Resolution
@@ -95,15 +93,16 @@ If the parachain is producing blocks but not processing DMP messages:
 ### XCM execution errors
 
 Common XCM execution failures:
+
 | Error | Meaning | Action |
 |---|---|---|
 | `TooExpensive` | Insufficient fee payment in XCM | Check fee configuration, may need more fee assets |
 | `AssetNotFound` | Destination doesn't recognize the asset | Check asset registration on destination chain |
 | `Barrier` | XCM message rejected by destination's barrier | Check destination's XCM barrier configuration |
 | `WeightNotComputable` | Can't determine execution weight | XCM program issue — escalate to dev team |
-| `Trap` | Explicit trap — assets held in trap storage | See Trapped assets below |
+| `Trap` | Explicit trap — assets held in trap storage | See [Trapped assets](#trapped-assets) |
 
-**How to check:** Look for XCM execution events on the **destination** chain:
+**How to check:** look for XCM execution events on the **destination** chain:
 - `xcmPallet.Attempted` with `Incomplete` or `Error` outcome
 - `messageQueue.ProcessingFailed` events
 

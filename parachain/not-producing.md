@@ -4,71 +4,59 @@
 >
 > See also: [monitoring/alert-reference](../monitoring/alert-reference.md)
 
-## Symptoms
+## Quick check
 
-- Parachain block height not increasing
-- Collator logs show collations built but not included
-- Relay chain shows no new parachain blocks backed/included for this para ID
+**1. Is this a node issue or a chain-level issue?**
+- Is the collator node synced? (both relay + parachain) → if not, see [node/collator-operations](../node/collator-operations.md)
+- Is the collator producing collations locally? Check logs for collation-related messages
+- Collator building blocks but they're not appearing on-chain → continue here
 
-## Quick Health Check
+**2. Is the parachain active?**
+- Check `paras.paraLifecycles(paraId)` on relay chain
+- Not found / Onboarding → see [onboarding](onboarding.md)
 
-**Confirm it's a chain-level issue, not a node issue:**
-1. Is the collator node synced? (both relay + para chain) → if not, see [node/collator-operations](../node/collator-operations.md)
-2. Is the collator producing collations locally? Check logs for `"Starting collation"` or `"Built collation"`
-3. If the collator is building blocks but they're not appearing on-chain → continue here
+**3. Does it have a core?**
+- Parachain needs coretime to get blocks included
+- See [coretime](coretime.md) if no core assigned
 
-**Loki:**
+## Triage
+
+1. **Parachain not active on relay chain?**
+   - `paras.paraLifecycles(paraId)` → not found or `Onboarding` → see [onboarding](onboarding.md)
+   - Status `Parathread` (on-demand) not `Parachain` (bulk)? → on-demand parachains only get blocks when orders are placed. See [Coretime / on-demand orders](#coretime--on-demand-orders)
+
+2. **No core assigned?**
+   - Parachain has no coretime allocation → see [coretime](coretime.md)
+
+3. **Core assigned but collation not backed?**
+   - Validators not receiving collation? → network issue between collator and assigned validators. Check collator peer count, validator group connectivity. See [Validators not receiving collation](#validators-not-receiving-collation)
+   - Collation validation failing? → PVF execution error on relay chain validators. See [PVF execution failure](#pvf-execution-failure)
+   - Collation backed but not included? → availability issue, not enough validators stored chunks. Check relay chain logs for availability/bitfield data
+
+4. **Intermittent — some blocks included, some not?**
+   - Multiple collators competing? → only one collation per core per relay block, normal to skip some slots
+   - Collation timing? → collation arrives too late for the relay block. See [Collation arriving too late](#collation-arriving-too-late)
+
+## Deep Investigation
+
+### Useful Loki queries
+
 ```logql
 # Collation built but not included
 {instance="<collator>"} |~ "collat|Built|backing|candidate"
 
-# Check for parachain-specific errors
+# Parachain-specific errors
 {instance="<collator>"} |~ "parachain" |= "ERROR"
 ```
 
-**On-chain check (via relay chain RPC or explorer):**
-- Check `paras.paraLifecycles(paraId)` — is the parachain active?
-- Check recent relay chain blocks for `paraInherent` extrinsics including this para ID
-
-## Decision Tree
+### On-chain checks
 
 ```
-Collator builds blocks but they're not included on relay chain
-│
-├─ Parachain not active on relay chain?
-│  ├─ Check paras.paraLifecycles(paraId)
-│  │  └─ Not found / Onboarding → see [onboarding](onboarding.md)
-│  │
-│  └─ Status is "Parathread" (on-demand) not "Parachain" (bulk)?
-│     └─ On-demand parachains only get blocks when orders are placed
-│        → Resolution: Coretime / on-demand orders
-│
-├─ No core assigned?
-│  └─ Parachain has no coretime allocation
-│     → see [coretime](coretime.md)
-│
-├─ Core assigned but collation not backed?
-│  ├─ Validators not receiving collation?
-│  │  └─ Network issue between collator and assigned validators
-│  │     Check: collator peer count, validator group connectivity
-│  │
-│  ├─ Collation validation failing?
-│  │  └─ PVF (Parachain Validation Function) execution error
-│  │     Check relay chain validator logs for PVF errors
-│  │     Possible: WASM runtime too heavy, execution timeout
-│  │
-│  └─ Collation backed but not included?
-│     └─ Availability issue — not enough validators stored chunks
-│        Check relay chain logs for availability/bitfield data
-│
-└─ Intermittent — some blocks included, some not?
-   ├─ Multiple collators competing?
-   │  └─ Only one collation per core per relay block
-   │     Normal to skip some slots with multiple collators
-   │
-   └─ Collation timing?
-      └─ Collation arrives too late for the relay block
-         Check collation build time in logs
+# Check parachain lifecycle
+paras.paraLifecycles(paraId)
+
+# Check recent relay chain blocks for parachain inclusion
+# Look for paraInherent extrinsics including this para ID
 ```
 
 ## Resolution
@@ -85,7 +73,7 @@ See [coretime](coretime.md) for details.
 ### Validators not receiving collation
 
 The collator advertises collations to the assigned validator group:
-1. Check collator has relay chain peers (the validators need to be reachable)
+1. Check collator has relay chain peers (validators need to be reachable)
 2. Check logs for `"Advertised collation"` and `"Sent collation"`
 3. If no validators are connecting: possible network partition
 4. Try restarting the collator — sometimes fixes stale connections
@@ -93,13 +81,13 @@ The collator advertises collations to the assigned validator group:
 ### PVF execution failure
 
 If validators reject the collation due to PVF errors:
-1. Check **relay chain validator logs** (not collator) for:
-   - `"PVF execution error"`, `"validation failed"`, `"timeout"`
+1. Check **relay chain validator logs** (not collator) for: `"PVF execution error"`, `"validation failed"`, `"timeout"`
 2. Common causes:
    - Parachain runtime too heavy (execution > 2s hard limit)
    - WASM compilation issue after runtime upgrade
    - PoV (Proof of Validity) too large (>5 MB limit)
 3. This requires **parachain runtime team** intervention
+4. See also [node/block-production — PVF bottleneck](../node/block-production.md#pvf-validation-bottleneck-validator-side)
 
 ### Collation arriving too late
 

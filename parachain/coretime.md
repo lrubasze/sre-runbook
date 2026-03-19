@@ -1,79 +1,69 @@
 # Runbook: Coretime Issues
 
-## Symptoms
+## Quick check
 
-- Parachain not getting relay chain slots to include blocks
-- Coretime expiring / expired
-- On-demand parachain orders not being fulfilled
+**1. What type of coretime?**
+- **Bulk coretime**: reserved in advance via Coretime chain
+- **On-demand coretime**: pay-per-block (formerly "parathreads")
+- Not sure? Check `paras.paraLifecycles(paraId)` → `Parachain` = bulk, `Parathread` = on-demand
 
-## Background
-
-**Coretime** is how parachains get execution time on the relay chain:
-- **Bulk coretime**: reserved blocks of execution time, purchased in advance (via Coretime chain)
-- **On-demand coretime**: pay-per-block, purchased individually (formerly "parathreads")
-
-Without coretime, a parachain cannot have blocks included on the relay chain.
-
-## Quick Health Check
-
-**On-chain (relay chain):**
+**2. Is the parachain active?**
 ```
-# Check if parachain has a core assigned
-# Use Coretime chain or relay chain state
-
-# Check parachain lifecycle
 paras.paraLifecycles(paraId)
 # Expected: "Parachain" (bulk) or "Parathread" (on-demand)
-
-# Check on-demand queue
-onDemandAssignmentProvider.freeEntries()
 ```
 
-**Loki:**
+**3. Without coretime, a parachain cannot have blocks included on the relay chain.**
+
+## Triage
+
+### Bulk coretime
+
+1. **Allocation active?**
+   - Check expiry on Coretime chain
+   - Expired → see [Bulk coretime expired](#bulk-coretime-expired)
+
+2. **Allocation active but no blocks included?**
+   - Core is assigned but collator isn't using it
+   - See [not-producing](not-producing.md)
+
+3. **Wrong para ID on allocation?**
+   - Verify the assignment maps to the correct para ID
+
+### On-demand coretime
+
+1. **Orders being placed?**
+   - No → application must submit on-demand orders. Not SRE — notify parachain team.
+
+2. **Orders placed but not fulfilled?**
+   - Queue may be congested. Check queue depth and spot price.
+   - See [On-demand queue congested](#on-demand-queue-congested)
+
+3. **Order fulfilled but block not produced?**
+   - Collator must produce within the assigned slot
+   - See [not-producing](not-producing.md)
+
+## Deep Investigation
+
+### Useful Loki queries
+
 ```logql
 # Core assignment logs on validators
 {instance="<validator>"} |~ "coretime|assignment|core.*sched"
 ```
 
-## Decision Tree
+### On-chain checks
 
 ```
-Parachain not getting slots
-│
-├─ Bulk coretime?
-│  ├─ Check if allocation is active
-│  │  └─ Expired? → need to renew on Coretime chain
-│  │
-│  ├─ Allocation active but no blocks included?
-│  │  └─ Core is assigned but collator isn't using it
-│  │     → see [not-producing](not-producing.md)
-│  │
-│  └─ Wrong para ID on allocation?
-│     └─ Verify the assignment maps to the correct para ID
-│
-├─ On-demand coretime?
-│  ├─ Orders being placed?
-│  │  └─ No → application must submit on-demand orders
-│  │     Not an SRE issue — notify the parachain team
-│  │
-│  ├─ Orders placed but not fulfilled?
-│  │  └─ On-demand queue may be congested
-│  │     Check queue depth and spot price
-│  │
-│  └─ Order fulfilled but block not produced?
-│     └─ Collator must produce within the assigned slot
-│        → see [not-producing](not-producing.md)
-│
-└─ Not sure which type?
-   └─ Check paras.paraLifecycles(paraId)
-      "Parachain" = bulk, "Parathread" = on-demand
+# Check on-demand queue
+onDemandAssignmentProvider.freeEntries()
 ```
 
 ## Resolution
 
 ### Bulk coretime expired
 
-1. **Check expiry on Coretime chain** (system parachain)
+1. Check expiry on Coretime chain (system parachain)
 2. Renewal must be done before or shortly after expiry
 3. This requires a transaction on the Coretime chain — not an SRE fix
 4. Notify the parachain team / governance to purchase or renew

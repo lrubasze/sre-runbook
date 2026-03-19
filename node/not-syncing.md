@@ -1,83 +1,69 @@
 # Runbook: Node Not Syncing
 
-## Symptoms
+> See also: [monitoring/alert-reference](../monitoring/alert-reference.md)
 
-- `substrate_block_height{status="best"}` is not increasing
-- Logs show no new blocks being imported
-- Node is stuck at a specific block number
-- Node is syncing but falling further behind the network
+## Quick check
 
-## Quick Health Check
+**1. Does the node have peers?**
+- `substrate_sub_libp2p_peers_count` > 0?
+- 0 peers → see [peer-connectivity](peer-connectivity.md)
 
-```logql
-# Check current block height vs network
-# In Grafana, compare:
-substrate_block_height{status="best", instance="<node>"}
-# against a known healthy node or public RPC
-
-# Check if node is importing blocks at all
-{instance="<node>"} |~ "Imported|imported"
-```
-
+**2. Is the node importing blocks at all?**
 ```bash
-# Via RPC (if accessible)
 curl -s -H "Content-Type: application/json" \
   -d '{"id":1,"jsonrpc":"2.0","method":"system_health","params":[]}' \
-  http://<node>:9933 | jq .
-
+  http://<node>:9944 | jq .
 # Expected: {"isSyncing": true/false, "peers": N, "shouldHavePeers": true}
 ```
 
-## Decision Tree
+**3. How far behind is it?**
+- Compare `substrate_block_height{status="best"}` against a known healthy node or public RPC
 
+## Triage
+
+1. **Has peers but not syncing?**
+   - Check logs for `"State sync"` or `"Warp sync"` → warp sync in progress, can take hours. See [Warp sync taking too long](#warp-sync-taking-too-long)
+   - Check logs for `"Verification failed"` or `"bad block"` → corrupt DB or wrong fork. See [DB corruption](#db-corruption)
+   - Check logs for `"Queue is full"` → node overwhelmed importing blocks. See [high-resource-usage](high-resource-usage.md)
+
+2. **Syncing but falling behind?**
+   - Check CPU — at 100%? Block execution is CPU-bound → see [high-resource-usage](high-resource-usage.md)
+   - Check disk I/O — saturated? RocksDB is I/O-bound → upgrade to SSD/NVMe
+   - Check network bandwidth — insufficient for block download?
+
+3. **Stuck after restart?**
+   - Check logs for `"Database"` errors → [DB corruption](#db-corruption)
+   - Check if node is replaying blocks (rebuilding state) → normal after unclean shutdown, wait for it to catch up
+
+## Deep Investigation
+
+### Useful Loki queries
+
+```logql
+# Check if node is importing blocks at all
+{instance="<node>"} |~ "Imported|imported"
+
+# Warp sync progress
+{instance="<node>"} |~ "warp|state download"
+
+# Block replay after unclean shutdown
+{instance="<node>"} |~ "Preparing|replay"
 ```
-Node not importing new blocks
-│
-├─ Has 0 peers?
-│  └─ Go to [peer-connectivity](peer-connectivity.md)
-│
-├─ Has peers but not syncing?
-│  ├─ Check logs for "State sync" or "Warp sync"
-│  │  └─ Warp sync in progress — can be slow, may take hours
-│  │     Check: {instance="<node>"} |~ "warp|state download"
-│  │
-│  ├─ Check logs for "Verification failed" or "bad block"
-│  │  └─ Node may be on wrong fork or have corrupt DB
-│  │     → Resolution: DB corruption
-│  │
-│  └─ Check logs for "Queue is full" or "too many"
-│     └─ Node is overwhelmed importing blocks
-│        → Resolution: Resource bottleneck (see 04-high-resource-usage)
-│
-├─ Syncing but falling behind?
-│  ├─ Check CPU usage — is it at 100%?
-│  │  └─ Block execution is CPU-bound
-│  │     → Resolution: Resource bottleneck
-│  │
-│  ├─ Check disk I/O — is it saturated?
-│  │  └─ RocksDB is I/O-bound
-│  │     → Resolution: Upgrade to SSD/NVMe
-│  │
-│  └─ Check network bandwidth
-│     └─ Insufficient bandwidth for block download
-│        → Resolution: Network bottleneck
-│
-└─ Stuck after restart?
-   ├─ Check logs for "Database" errors
-   │  └─ → Resolution: DB corruption
-   │
-   └─ Check if node is replaying blocks (rebuilding state)
-      └─ Normal after unclean shutdown. Wait for it to catch up.
-         Check: {instance="<node>"} |~ "Preparing|replay"
+
+### Useful Prometheus queries
+
+```promql
+substrate_block_height{status="best", instance="<node>"}
+substrate_block_height{status="finalized", instance="<node>"}
 ```
 
 ## Resolution
 
 ### Warp sync taking too long
 
-- Warp sync downloads finality proofs first, then state. The state download phase can take hours depending on chain size.
-- **Check progress:** Look for `State sync` log messages showing download percentage.
-- **Not a problem** unless it's been >24h with no progress. If stuck:
+- Warp sync downloads finality proofs first, then state. State download can take hours depending on chain size.
+- **Check progress:** look for `State sync` log messages showing download percentage
+- **Not a problem** unless >24h with no progress. If stuck:
   - Verify peers are reachable (check peer count)
   - Consider restarting the node
   - Check if disk space is sufficient
@@ -106,8 +92,6 @@ Quick checks:
 
 ## Escalation
 
-If none of the above resolves the issue:
-- Collect logs from the stuck period: `{instance="<node>"} |= "ERROR" OR |= "WARN"`
-- Note the exact block number where it's stuck
-- Check if other nodes on the same network are also affected (network-wide issue vs single node)
+- Collect: logs from the stuck period, exact block number where stuck, peer count
+- Check: are other nodes on the same network also affected? (network-wide vs single node)
 - Escalate to: `[TODO: dev team contact / channel]`

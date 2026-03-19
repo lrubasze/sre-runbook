@@ -4,17 +4,67 @@
 >
 > See also: [monitoring/alert-reference](../monitoring/alert-reference.md)
 
-## Symptoms
+## Quick check
 
-- Node killed by OOM killer
-- High CPU usage (>90% sustained)
-- Disk full or filling fast
-- Node becoming unresponsive
+**1. What resource is the problem?**
+```bash
+# OOM killed?
+dmesg | grep -i "oom\|killed process"
+journalctl -k | grep -i oom
 
-## Quick Health Check
+# Disk full?
+df -h /path/to/chain/data
 
-**Prometheus / Grafana:**
+# Memory pressure?
+free -h
+
+# CPU?
+uptime
 ```
+
+**2. When did it start?**
+- During initial sync? → expected, sync is resource-intensive
+- During normal operation? → continue to triage
+- After runtime upgrade? → new runtime may have higher requirements
+
+## Triage
+
+### OOM killed
+
+1. **During initial sync?**
+   - Sync is memory-intensive (state download, trie building)
+   - See [Memory during sync](#memory-during-sync)
+
+2. **During normal operation?**
+   - Check `--state-cache-size` — default may be too large for available RAM
+   - Check if finalization is stalled → journals accumulate in memory. See [finalization-stall](finalization-stall.md)
+   - RSS growing unbounded over days? → possible memory leak, escalate with memory profile
+
+3. **After runtime upgrade?**
+   - New runtime may need more memory → increase allocation
+
+4. **Crash loop (OOM → restart → OOM)?**
+   - Reduce `--state-cache-size`, increase RAM, or restore from snapshot
+   - See [Memory during normal operation](#memory-during-normal-operation)
+
+### High CPU
+
+1. **During sync?** → expected, block execution is CPU-intensive
+2. **During normal operation?** → check if re-executing old blocks (state rebuild) or RocksDB compaction spike
+3. **100% sustained on all cores?** → possible infinite loop or consensus issue → [Escalation](#escalation)
+
+### Disk full
+
+1. **Pruning mode?** → archive nodes grow ~100+ GB/year, pruned are much smaller
+2. **RocksDB compaction backlog?** → needs 20%+ free headroom for compaction
+3. **Log files filling disk?** → check log rotation config
+4. See [Disk full resolution](#disk-full)
+
+## Deep Investigation
+
+### Useful Prometheus queries
+
+```promql
 # Memory
 process_resident_memory_bytes{instance="<node>"}
 
@@ -25,81 +75,22 @@ rate(process_cpu_seconds_total{instance="<node>"}[5m])
 process_open_fds{instance="<node>"}
 ```
 
-**Loki:**
-```logql
-# Check for OOM or resource warnings
-{instance="<node>"} |~ "OOM|memory|out of memory"
-```
+### Host-level checks
 
-**On the host:**
 ```bash
-# Check if OOM killer struck
-dmesg | grep -i "oom\|killed process"
-journalctl -k | grep -i oom
-
-# Disk usage
-df -h /path/to/chain/data
-
-# Memory
-free -h
-
 # Process memory details
 cat /proc/<pid>/status | grep -i vm
-```
 
-## Decision Tree
-
-```
-High resource usage
-│
-├─ OOM killed?
-│  ├─ During initial sync (warp/full)?
-│  │  └─ Sync is memory-intensive (state download, trie building)
-│  │     → Resolution: Memory during sync
-│  │
-│  ├─ During normal operation?
-│  │  ├─ Check state DB cache size (--state-cache-size)
-│  │  │  └─ Default may be too large for available RAM
-│  │  │
-│  │  ├─ Check if finalization is stalled
-│  │  │  └─ Stalled finality = journals/state accumulates in memory
-│  │  │     Go to [finalization-stall](finalization-stall.md)
-│  │  │
-│  │  └─ Memory leak? (RSS growing unbounded over days)
-│  │     → Resolution: Escalate with memory profile
-│  │
-│  └─ After runtime upgrade?
-│     └─ New runtime may have higher memory requirements
-│        → Resolution: Increase memory allocation
-│
-├─ High CPU?
-│  ├─ During sync?
-│  │  └─ Expected — block execution is CPU-intensive
-│  │
-│  ├─ During normal operation?
-│  │  └─ Check if node is re-executing old blocks (state rebuild)
-│  │     Or: RocksDB compaction spike
-│  │
-│  └─ 100% sustained on all cores?
-│     └─ Possible infinite loop or consensus issue → escalate
-│
-└─ Disk full?
-   ├─ Pruning mode?
-   │  └─ Archive nodes grow ~100+ GB/year
-   │     Pruned nodes are much smaller
-   │
-   ├─ RocksDB compaction backlog?
-   │  └─ Disk needs headroom for compaction (20%+ free recommended)
-   │
-   └─ Log files filling disk?
-      └─ Check log rotation config
+# Disk breakdown
+du -sh /path/to/chain/data/*
+# Typical: db/ (biggest), keystore/ (small), network/ (small)
 ```
 
 ## Resolution
 
 ### Memory during sync
 
-Warp sync and state rebuilding are the most memory-intensive operations. Options:
+Warp sync and state rebuilding are the most memory-intensive operations:
 1. **Increase node memory** to 16+ GB during sync
 2. **Limit state cache:** `--state-cache-size 1073741824` (1 GB, default may be higher)
 3. If using `--state-pruning archive`: requires significantly more memory
@@ -114,20 +105,14 @@ Expected baseline memory (rough guide):
 
 If memory exceeds these significantly:
 1. Check `--state-cache-size` setting
-2. Check finalization status — if finalized block is far behind best block, state journals accumulate in RAM
-3. Check for known memory issues in release notes of the running version
+2. Check finalization status — if finalized block is far behind best, state journals accumulate in RAM
+3. Check for known memory issues in release notes
 4. Restart the node (resets caches, reclaims leaked memory)
 
 ### Disk full
 
 ```bash
-# Check what's using space
 du -sh /path/to/chain/data/*
-
-# Typical breakdown:
-# db/         - RocksDB (biggest)
-# keystore/   - small
-# network/    - small
 ```
 
 Options:

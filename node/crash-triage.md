@@ -2,106 +2,74 @@
 
 > **Triggered by alert:** `VMNodeProcessCrashed`
 
-## Symptoms
+## Quick check
 
-- Node process exited unexpectedly
-- Systemd restarted the service (or it's in a crash loop)
-- `dmesg` or `journalctl` shows OOM kill, segfault, or panic
-
-## Quick Health Check
-
+**1. Is the node running now?**
 ```bash
-# Is the node running now?
 systemctl status <service>
+```
 
-# How many recent restarts?
-journalctl -u <service> --since "1 hour ago" | grep -c "Started\|Stopped"
-
-# Check for OOM kill
+**2. What killed it?**
+```bash
+# OOM?
 dmesg | grep -i "oom\|killed process"
-journalctl -k --since "1 hour ago" | grep -i oom
 
-# Check for panic/segfault
+# Panic or segfault?
 journalctl -u <service> --since "1 hour ago" | grep -i "panic\|segfault\|SIGSEGV\|SIGABRT\|fatal"
 
-# Check last exit status
+# Exit status
 systemctl show <service> --property=ExecMainStatus
 ```
 
-## Decision Tree
+**3. Is it crash-looping?**
+```bash
+journalctl -u <service> --since "1 hour ago" | grep -c "Started\|Stopped"
+```
 
-```
-Node crashed
-│
-├─ OOM killed? (dmesg shows "Out of memory: Killed process")
-│  ├─ During initial sync?
-│  │  └─ Sync is memory-intensive
-│  │     Increase RAM or limit cache: --state-cache-size 1073741824
-│  │     See [high-resource-usage](high-resource-usage.md)
-│  │
-│  ├─ During normal operation?
-│  │  ├─ Finalization stalled? (journals accumulating)
-│  │  │  └─ Memory is a symptom, fix finalization first
-│  │  │     See [finalization-stall](finalization-stall.md)
-│  │  │
-│  │  ├─ After runtime upgrade?
-│  │  │  └─ New runtime may need more memory → increase allocation
-│  │  │
-│  │  └─ Memory growing steadily over days? (leak)
-│  │     └─ Collect RSS graph over 24-48h → escalate to dev team
-│  │
-│  └─ Crash loop (OOM → restart → OOM)?
-│     └─ Reduce --state-cache-size, increase RAM, or restore from snapshot
-│        See [high-resource-usage](high-resource-usage.md)
-│
-├─ Panic in Rust code? (logs show "thread panicked" or backtrace)
-│  └─ This is a bug in the node software
-│     1. Capture the full backtrace from logs
-│     2. Note exact binary version: polkadot --version
-│     3. Note the block height when it panicked
-│     4. Check if known issue in release notes
-│     5. Escalate with backtrace → dev team
-│
-├─ Segmentation fault? (SIGSEGV)
-│  └─ Possible causes:
-│     - Corrupt binary (re-download/rebuild)
-│     - Hardware issue (check ECC memory errors, disk health)
-│     - WASM execution issue (rare)
-│     1. Verify binary checksum against release
-│     2. Check hardware: `smartctl -a /dev/sda`, `mcelog`
-│     3. If recurring: escalate to dev team
-│
-├─ DB corruption on restart?
-│  └─ Crash during write can corrupt RocksDB
-│     Logs: "database", "corruption", "invalid"
-│     See [not-syncing](not-syncing.md) — DB corruption section
-│
-└─ No clear cause in logs?
-   ├─ Check if process was killed externally
-   │  └─ `journalctl -u <service> | grep -i "signal\|kill"`
-   │     systemd OOMPolicy, cgroup limits, manual kill
-   │
-   └─ Check host-level issues
-      └─ Disk full? Power event? Kernel issue?
-         `dmesg | tail -50`
-         `df -h`
-```
+## Triage
+
+1. **OOM killed?** (`dmesg` shows "Out of memory: Killed process")
+   - During initial sync? → sync is memory-intensive. Increase RAM or limit cache: `--state-cache-size 1073741824`. See [high-resource-usage](high-resource-usage.md)
+   - Finalization stalled? → journals accumulate in memory. Fix finalization first. See [finalization-stall](finalization-stall.md)
+   - After runtime upgrade? → new runtime may need more memory, increase allocation
+   - Memory growing over days? (leak) → collect RSS graph over 24-48h, [Escalation](#escalation)
+   - Crash loop? → reduce `--state-cache-size`, increase RAM, or restore from snapshot
+   - See [After OOM kill](#after-oom-kill)
+
+2. **Panic in Rust code?** (logs show "thread panicked" or backtrace)
+   - This is a bug in the node software
+   - Capture the full backtrace, binary version (`polkadot --version`), block height
+   - Check if known issue in release notes
+   - See [After panic](#after-panic)
+
+3. **Segmentation fault?** (SIGSEGV)
+   - Possible: corrupt binary, hardware issue, WASM execution issue (rare)
+   - See [After segfault](#after-segfault)
+
+4. **DB corruption on restart?**
+   - Crash during write can corrupt RocksDB
+   - Logs: `"database"`, `"corruption"`, `"invalid"`
+   - See [not-syncing — DB corruption](not-syncing.md#db-corruption)
+
+5. **No clear cause in logs?**
+   - Check if process was killed externally: `journalctl -u <service> | grep -i "signal\|kill"` (systemd OOMPolicy, cgroup limits, manual kill)
+   - Check host-level issues: disk full? power event? kernel issue? `dmesg | tail -50`, `df -h`
 
 ## Resolution
 
 ### After OOM kill
 
-1. **Immediate:** If the node restarted successfully, check it's syncing:
+1. **Immediate:** if the node restarted successfully, check it's syncing:
    ```bash
    curl -s -H "Content-Type: application/json" \
      -d '{"id":1,"jsonrpc":"2.0","method":"system_health","params":[]}' \
-     http://<node>:9933 | jq .
+     http://<node>:9944 | jq .
    ```
 2. **Prevent recurrence:**
    - Reduce `--state-cache-size` (e.g., to 1 GB or 512 MB)
    - Increase machine memory
    - Check and fix finalization stall if present
-3. **If crash-looping:** Restore from snapshot to avoid repeated OOM during state rebuild
+3. **If crash-looping:** restore from snapshot to avoid repeated OOM during state rebuild
 
 ### After panic
 

@@ -2,125 +2,87 @@
 
 > **Triggered by alerts:** `UnhealthyRPCEndpoint`, `SlowRPCCallTime`, `UnhealthyRPCCloudflareLBPool`
 
-## Symptoms
+## Quick check
 
-- RPC endpoint returning errors or timeouts
-- RPC calls taking >5 seconds
-- Health check probes failing
-- WebSocket connections dropping
-- Cloudflare LB marking pool members unhealthy
-
-## Quick Health Check
-
+**1. Is the node running?**
 ```bash
-# Basic HTTP health check
+systemctl status <service>
+ss -tlnp | grep 9944
+```
+- Not running → see [crash-triage](crash-triage.md)
+
+**2. Does it respond?**
+```bash
+# Basic health
 curl -s -o /dev/null -w "%{http_code}" http://<node>:9944/health
 
-# Test a simple RPC call with timing
+# Timed RPC call
 time curl -s -H "Content-Type: application/json" \
   -d '{"id":1,"jsonrpc":"2.0","method":"system_health","params":[]}' \
   http://<node>:9944
-
-# Test a WebSocket connection
-websocat ws://<node>:9944 --ping-interval 5 -1
-
-# Check if the port is open and the process is listening
-ss -tlnp | grep 9944
-
-# Check node process
-systemctl status <service>
 ```
 
-**Prometheus:**
+**3. Is the host overloaded?**
+```bash
+uptime       # load average
+free -h      # swap usage
+df -h        # disk space
 ```
-# Node process running and responsive?
+
+## Triage
+
+1. **Port not responding?**
+   - RPC disabled? Check CLI flags for `--rpc-port`, `--unsafe-rpc-external` → ensure RPC is enabled and bound to correct interface
+   - Too many connections? `ss -tn | grep :9944 | wc -l` → see [Connection limits](#connection-limits)
+   - Process hung? Check CPU, check if node is syncing (block import prioritized over RPC). Last resort: restart
+
+2. **RPC responding but slow (>5s)?**
+   - All calls slow?
+     - CPU overloaded → node doing heavy work (sync, compaction). See [high-resource-usage](high-resource-usage.md)
+     - Swapping? `free -h` shows high swap → not enough RAM. Reduce `--state-cache-size` or increase memory. See [Swap/memory](#swapmemory-causing-slowness)
+   - Only state queries slow? → large state reads on archive nodes can be inherently slow (`state_getStorage`, `state_queryStorageAt`). Not necessarily a problem.
+   - Only subscriptions timing out? → WebSocket backpressure, too many subscribers. Consider adding RPC nodes.
+
+3. **Intermittent failures?**
+   - Correlated with block production times? → block execution competing for CPU. Consider dedicated RPC nodes (non-validator). See [Node too busy](#node-too-busy-for-rpc)
+   - Correlated with RocksDB compaction? → temporary I/O spikes. See [high-resource-usage](high-resource-usage.md)
+
+4. **Cloudflare LB specific?**
+   - All backends failing health checks? → check each backend directly
+   - Health check config mismatch? → ensure CF health check path/port matches node config
+   - Backends healthy but LB unhealthy? → Cloudflare-side issue, check status page
+   - See [Cloudflare LB resolution](#cloudflare-lb-pool-unhealthy)
+
+## Deep Investigation
+
+### Useful Prometheus queries
+
+```promql
+# Node up?
 up{instance="<node>"}
 
-# CPU — is the node overloaded?
+# CPU
 rate(process_cpu_seconds_total{instance="<node>"}[5m])
 
-# Memory — is it swapping?
+# Memory
 process_resident_memory_bytes{instance="<node>"}
 
-# Open file descriptors — approaching limit?
+# File descriptors
 process_open_fds{instance="<node>"}
 ```
 
-**On the host:**
+### Host-level checks
+
 ```bash
-# Is the system swapping?
-free -h
+# Swap activity
 vmstat 1 5   # check si/so columns
 
 # Connection count to RPC port
-ss -s
 ss -tn | grep :9944 | wc -l
 
-# CPU load
-uptime
-```
-
-## Decision Tree
-
-```
-RPC endpoint unhealthy or slow
-│
-├─ Node process not running?
-│  └─ Check crash cause → see [crash-triage](crash-triage.md)
-│
-├─ Node running but port not responding?
-│  ├─ RPC disabled? Check CLI flags for --rpc-port, --unsafe-rpc-external
-│  │  └─ Ensure RPC is enabled and bound to correct interface
-│  │
-│  ├─ Too many connections?
-│  │  └─ Check: ss -tn | grep :9944 | wc -l
-│  │     Default max connections may be hit
-│  │     → Resolution: Connection limits
-│  │
-│  └─ Process is hung/unresponsive?
-│     └─ Check CPU — may be stuck in long operation
-│        Check if node is syncing (block import is prioritized over RPC)
-│        Last resort: restart the node
-│
-├─ RPC responding but slow (>5s)?
-│  ├─ All calls slow?
-│  │  ├─ CPU overloaded?
-│  │  │  └─ Node doing heavy work (sync, compaction, block execution)
-│  │  │     See [high-resource-usage](high-resource-usage.md)
-│  │  │
-│  │  └─ Swapping?
-│  │     └─ free -h shows high swap usage
-│  │        Cause: not enough RAM
-│  │        → Increase memory or reduce --state-cache-size
-│  │
-│  ├─ Only state queries slow?
-│  │  └─ Large state reads on archive nodes can be inherently slow
-│  │     state_getStorage, state_queryStorageAt, etc.
-│  │     Not necessarily a problem — check if query is reasonable
-│  │
-│  └─ Only subscriptions timing out?
-│     └─ WebSocket backpressure — too many subscribers
-│        Check subscription count, consider adding RPC nodes
-│
-├─ Intermittent failures?
-│  ├─ Correlated with block production times?
-│  │  └─ Block execution competing for CPU with RPC
-│  │     Consider dedicated RPC nodes (non-validator)
-│  │
-│  └─ Correlated with RocksDB compaction?
-│     └─ Temporary I/O spikes
-│        See [high-resource-usage](high-resource-usage.md)
-│
-└─ Cloudflare LB specific?
-   ├─ All backends failing health checks?
-   │  └─ Check each backend directly — may be node-side issue
-   │
-   ├─ Health check config mismatch?
-   │  └─ Ensure CF health check path/port matches node config
-   │     Common: health check uses wrong port or path
-   │
-   └─ Backends healthy but LB unhealthy?
-      └─ Cloudflare-side issue — check Cloudflare status page
+# File descriptor usage
+ls /proc/<node-pid>/fd | wc -l
+ulimit -n
 ```
 
 ## Resolution
@@ -128,12 +90,7 @@ RPC endpoint unhealthy or slow
 ### Connection limits
 
 ```bash
-# Check current connections
 ss -tn | grep :9944 | wc -l
-
-# Check file descriptor usage
-ls /proc/<node-pid>/fd | wc -l
-ulimit -n  # should be >= 10000
 ```
 
 If connection count is very high:
@@ -145,23 +102,20 @@ If connection count is very high:
 ### Node too busy for RPC
 
 If the node is a validator and RPC is slow due to block production load:
-1. **Best practice:** Run dedicated RPC nodes (non-validator) for serving RPC traffic
+1. **Best practice:** run dedicated RPC nodes (non-validator) for serving RPC traffic
 2. Validators should not serve public RPC — it competes with consensus duties
 3. If validator must serve RPC: limit exposure to internal/monitoring use only
 
 ### Swap/memory causing slowness
 
 ```bash
-# Check swap usage
 free -h
 swapon --show
-
-# If heavily swapping:
-# 1. Reduce state cache
-# polkadot --state-cache-size 536870912  (512 MB)
-
-# 2. Or increase RAM
 ```
+
+If heavily swapping:
+1. Reduce state cache: `--state-cache-size 536870912` (512 MB)
+2. Or increase RAM
 
 ### Cloudflare LB pool unhealthy
 
@@ -174,12 +128,12 @@ swapon --show
      echo
    done
    ```
-3. If backends are healthy but CF marks them down: check health check configuration (path, port, expected response code, timeout)
-4. If a subset of backends are down: fix individual nodes per other runbooks
+3. Backends healthy but CF marks them down? → check health check config (path, port, expected response code, timeout)
+4. Subset of backends down? → fix individual nodes per other runbooks
 
 ## Escalation
 
-- Collect: RPC response times, connection count, CPU/memory at the time, which RPC methods are slow
+- Collect: RPC response times, connection count, CPU/memory, which RPC methods are slow
 - Note: node role (validator/full/archive), whether RPC is public or internal
-- For persistent slowness with adequate resources: may indicate node software issue → escalate to dev team
+- For persistent slowness with adequate resources: may indicate software issue
 - Escalate to: `[TODO: infra team / dev team contact]`

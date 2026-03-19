@@ -1,41 +1,35 @@
 # Runbook: Runtime Upgrade Checklist
 
-## Overview
+## Quick check
 
-Runtime upgrades change the on-chain logic (WASM) without requiring a node binary update. However, they can introduce behavioral changes that affect node operation.
+**Before the upgrade:**
+- [ ] Know the block number — when will the upgrade enact?
+- [ ] Read the release notes — any breaking changes?
+- [ ] Check node binary compatibility — some upgrades require a minimum client version
+- [ ] Ensure monitoring is active — watch dashboards during the upgrade window
+- [ ] Notify the team — ensure on-call knows the upgrade is happening
 
-## Pre-Upgrade Checklist
+## During the upgrade
 
-- [ ] **Know the block number** — when will the upgrade enact?
-- [ ] **Read the release notes** — what changed? any breaking changes?
-- [ ] **Check node binary compatibility** — some runtime upgrades require a minimum client version
-- [ ] **Ensure monitoring is active** — watch dashboards during the upgrade window
-- [ ] **Notify the team** — ensure on-call knows the upgrade is happening
+### What to monitor
 
-## What to Monitor During Upgrade
-
-**Block of enactment:**
-```logql
-# Watch for runtime upgrade execution
-{instance="<node>"} |~ "runtime|Runtime|upgrade|wasm"
-```
-
-**Key metrics to watch:**
-```
+```promql
 # Block production should continue uninterrupted
 rate(substrate_block_height{status="best"}[1m])
 
 # Finalization should continue
 substrate_block_height{status="best"} - substrate_block_height{status="finalized"}
 
-# Block execution time may spike briefly
-substrate_block_height_number
-
 # Peer count should remain stable
 substrate_sub_libp2p_peers_count
 ```
 
-## Post-Upgrade Checks
+```logql
+# Watch for runtime upgrade execution
+{instance="<node>"} |~ "runtime|Runtime|upgrade|wasm"
+```
+
+### Post-upgrade checks
 
 - [ ] Blocks are still being produced at normal rate
 - [ ] Finalization is progressing (gap not growing)
@@ -43,7 +37,7 @@ substrate_sub_libp2p_peers_count
 - [ ] Peer count stable
 - [ ] Memory/CPU within normal range (runtime may change resource profile)
 
-## Common Issues After Runtime Upgrade
+## Triage — common issues after upgrade
 
 | Issue | Possible cause | Action |
 |---|---|---|
@@ -52,7 +46,9 @@ substrate_sub_libp2p_peers_count
 | New ERROR logs appearing | Runtime behavior change exposed client issue | Collect logs, escalate |
 | Peer disconnections | Peers on incompatible versions | Check if peers need updates |
 
-## Rollback
+## Resolution
+
+### Rollback
 
 Runtime upgrades **cannot be rolled back** directly — they require governance to enact a new upgrade. If the upgrade causes critical issues:
 

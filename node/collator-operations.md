@@ -4,38 +4,71 @@
 >
 > See also: [monitoring/alert-reference](../monitoring/alert-reference.md)
 
-## Overview
+## Quick check
 
-A parachain collator:
-1. Runs an **embedded relay chain node** (syncs the relay chain)
-2. Runs the **parachain node** (syncs its own chain)
-3. **Produces parachain blocks** (collations) and submits them to relay chain validators
+A collator runs two chains: an embedded relay chain node + the parachain node. Both must be healthy.
 
-Both the relay chain and parachain components must be healthy.
-
-## Symptoms
-
-- Collator not producing blocks
-- Parachain falling behind (not importing relay-chain-backed blocks)
-- Collator sync issues (relay chain or parachain side)
-
-## Quick Health Check
-
+**1. Are both chains synced?**
 ```bash
-# Check both chain heights
-# Relay chain height
-curl -s -H "Content-Type: application/json" \
-  -d '{"id":1,"jsonrpc":"2.0","method":"system_health","params":[]}' \
-  http://<node>:9933 | jq .
-
-# Parachain height (usually on a different RPC port, e.g., 9944)
+# Parachain health (default port 9944)
 curl -s -H "Content-Type: application/json" \
   -d '{"id":1,"jsonrpc":"2.0","method":"system_health","params":[]}' \
   http://<node>:9944 | jq .
+
+# Relay chain health (default port 9945)
+curl -s -H "Content-Type: application/json" \
+  -d '{"id":1,"jsonrpc":"2.0","method":"system_health","params":[]}' \
+  http://<node>:9945 | jq .
 ```
 
-**Prometheus:**
+**2. Does the collator have peers on both chains?**
+- `substrate_sub_libp2p_peers_count` — check for both chain labels
+
+**3. Is the collator producing?**
+- `substrate_block_height{status="best", chain="<parachain>"}` — advancing?
+
+## Triage
+
+1. **Relay chain not synced?**
+   - Embedded relay chain must sync first
+   - Same debugging as [not-syncing](not-syncing.md)
+   - Note: relay chain on collator syncs in "light" mode by default
+
+2. **Parachain not syncing?**
+   - Check if parachain has peers (separate from relay chain peers)
+   - Parachain peers discovered via relay chain DHT or explicit `--bootnodes`
+   - Logs: `"waiting for relay chain"` → parachain waits for relay chain to sync
+   - See [Parachain peer discovery](#parachain-peer-discovery)
+
+3. **Collator not producing blocks?**
+   - Is the collator registered on-chain? → not SRE, check with parachain team
+   - Is it the collator's turn? (AURA) → only the designated collator produces per slot
+   - Check for block production issues → see [block-production](block-production.md) (collator triage section)
+
+4. **Collation produced but not included?**
+   - This is a chain-level issue, not a node issue
+   - See [parachain/not-producing](../parachain/not-producing.md)
+   - See [parachain/coretime](../parachain/coretime.md) for core assignment
+
+5. **Blocks not finalized?**
+   - Parachain finality depends on relay chain finality
+   - See [finalization-stall](finalization-stall.md)
+
+## Deep Investigation
+
+### Useful Loki queries
+
+```logql
+# Collation-related logs
+{instance="<node>"} |~ "collat|Collat|parachain|aura"
+
+# Relay chain sync on collator
+{instance="<node>"} |~ "relay.*sync|relay.*import"
 ```
+
+### Useful Prometheus queries
+
+```promql
 # Parachain best block
 substrate_block_height{status="best", chain="<parachain>"}
 
@@ -46,55 +79,16 @@ substrate_block_height{status="best", chain="<relay>"}
 substrate_sub_libp2p_peers_count
 ```
 
-**Loki:**
-```logql
-# Collation-related logs
-{instance="<node>"} |~ "collat|Collat|parachain|aura"
+### Key differences from relay chain nodes
 
-# Relay chain sync on collator
-{instance="<node>"} |~ "relay.*sync|relay.*import"
-```
-
-## Decision Tree
-
-```
-Collator issues
-│
-├─ Relay chain not synced on collator?
-│  └─ The embedded relay chain node must be synced first
-│     Check relay chain block height
-│     Same debugging as [not-syncing](not-syncing.md)
-│     Note: relay chain on collator syncs in "light" mode by default
-│
-├─ Parachain not syncing?
-│  ├─ Check if parachain has peers
-│  │  └─ Parachain needs its own peers (separate from relay chain peers)
-│  │     Ensure parachain bootnodes are configured
-│  │
-│  └─ Check for "waiting for relay chain" in logs
-│     └─ Parachain waits until relay chain is sufficiently synced
-│
-├─ Collator not producing blocks?
-│  ├─ Is the collator registered on-chain?
-│  │  └─ Not an SRE issue — check with parachain team
-│  │
-│  ├─ Is it the collator's turn? (AURA-based)
-│  │  └─ Only the designated collator produces per slot
-│  │     Check logs for "Starting collation" or "slot"
-│  │
-│  ├─ Collation produced but not included?
-│  │  └─ Validators may not have included the collation
-│  │     Check relay chain for parachain inclusion
-│  │
-│  └─ Collation timeout?
-│     └─ Block production took too long
-│        Check CPU/memory during collation window
-│
-└─ Collator producing but blocks not finalized?
-   └─ Parachain finality depends on relay chain finality
-      Check relay chain finalization status
-      Go to [finalization-stall](finalization-stall.md)
-```
+| Aspect | Relay chain node | Parachain collator |
+|---|---|---|
+| Sync | Single chain | Two chains (relay + para) |
+| Block production | BABE (6s slots) | AURA (12s typical) + relay chain scheduling |
+| Finality | Own GRANDPA | Inherits from relay chain |
+| Peers needed | Relay chain peers | Both relay chain + parachain peers |
+| Memory | ~4-8 GB | ~4-8 GB (two chains) |
+| Ports | 30333 (P2P), 9944 (RPC) | 30333 + 30334 (two P2P), 9944 + 9945 (two RPC) |
 
 ## Resolution
 
@@ -119,20 +113,9 @@ If 0 parachain peers:
 
 ### Collation not being included
 
-If the collator produces blocks but they're not included on the relay chain — this is a **chain-level issue**, not a node issue. See the parachain runbooks:
+If the collator produces blocks but they're not included on the relay chain — this is a **chain-level issue**, not a node issue. See:
 - [parachain/not-producing](../parachain/not-producing.md) — collation backing/inclusion failures
 - [parachain/coretime](../parachain/coretime.md) — core assignment issues
-
-## Key Differences from Relay Chain Nodes
-
-| Aspect | Relay chain node | Parachain collator |
-|---|---|---|
-| Sync | Single chain | Two chains (relay + para) |
-| Block production | BABE (6s slots) | AURA (12s typical) + relay chain scheduling |
-| Finality | Own GRANDPA | Inherits from relay chain |
-| Peers needed | Relay chain peers | Both relay chain + parachain peers |
-| Memory | ~4-8 GB | ~4-8 GB (two chains) |
-| Ports | 30333 (P2P), 9944 (RPC) | 30333 + 30334 (two P2P), 9944 + 9945 (two RPC) |
 
 ## Escalation
 
